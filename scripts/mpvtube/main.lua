@@ -13,10 +13,12 @@ local mp_options = require("mp.options")
 local function load_options()
     local options = {
         scale=1, font="Roboto", accent="ff0033", hide_timeout=3, fade_duration=0.25,
-        show_on_pause=true, title=true, tooltip_delay=0.45, menu_width=380, menu_opacity=0.6,
-        keyboard=true, video_click=true, theater=true, pip=true, raise_subtitles=true, thumbnails="auto",
+        show_on_pause=true, title=true, tooltip_delay=0.45, menu_width=480, menu_opacity=0.6,
+        shortcut_width=900, shortcut_policy="mpvtube", keymap_path="",
+        keyboard=true, video_click=true, pip=true, raise_subtitles=true, thumbnails="auto",
         ffmpeg_path="ffmpeg", thumbnail_width=200, thumbnail_interval=2, thumbnail_delay=0,
-        thumbnail_cache=64, pip_width=480, theater_width=1280,
+        thumbnail_cache=64, pip_width=480, seek_precise=3, seek_short=10, seek_medium=60, seek_long=300,
+        volume_max=200, volume_step=5, sync_step=.05,
     }
 
     -- Bound dimensions/timings to keep malformed settings usable and the cache finite.
@@ -26,9 +28,14 @@ local function load_options()
         end
         number("scale",0.5,3); number("hide_timeout",0.1,30); number("fade_duration",0,1)
         number("tooltip_delay",0,5); number("menu_width",240,600); number("menu_opacity",0.2,1)
+        number("shortcut_width",480,1200)
+        if not ({mpvtube=true,compatible=true,exclusive=true})[options.shortcut_policy] then options.shortcut_policy="mpvtube" end
         number("thumbnail_width",120,320); number("thumbnail_interval",1,60)
         number("thumbnail_delay",0,2); number("thumbnail_cache",1,256)
-        number("pip_width",240,960); number("theater_width",640,3840)
+        number("pip_width",240,960)
+        for _,tier in ipairs({"precise","short","medium","long"}) do number("seek_"..tier,.1,3600) end
+        number("volume_max",100,1000)
+        number("volume_step",.1,100); number("sync_step",.001,10)
         options.thumbnail_cache=math.floor(options.thumbnail_cache)
         options.accent=options.accent:gsub("^#","")
         if not options.accent:match("^%x%x%x%x%x%x$") then options.accent="ff0033" end
@@ -43,6 +50,7 @@ local function load_options()
 end
 
 local options = load_options()
+options.ffmpeg_available=false
 
 -- Observers fill playback fields; input and animation fields live in the same state table.
 local state = {w=1280,h=720,scale=1,time=0,pause=false,mute=false,volume=100,speed=1,
@@ -92,7 +100,7 @@ end
 
 -- Interaction and paused playback prevent the inactivity timer from hiding controls.
 local function held_open()
-    return state.menu or state.drag or state.hover or (state.pause and options.show_on_pause)
+    return state.menu or state.focus or state.drag or state.hover or (state.pause and options.show_on_pause)
 end
 
 local function schedule_hide()
@@ -178,7 +186,7 @@ local function render()
         preview:display(view.layout.preview,state.scale)
     end
     input.update_hover()
-    player.update_menu_binding()
+    input.update_focus()
     if animation:finish() or state.feedback then request_render() end
 end
 
@@ -189,6 +197,9 @@ end,true)
 
 -- Each entry maps an MPV property to its type, state field and missing-value fallback.
 local properties = {
+    {"load-select","bool","native_select",true},{"load-console","bool","native_console",true},
+    {"input-bindings","native","bindings",{}},{"volume-max","number","volume_max",200},
+    {"sub-delay","number","sub_delay",0},{"audio-delay","number","audio_delay",0},
     {"time-pos","number","time",0},{"duration","number","duration"},
     {"pause","bool","pause",false},{"mute","bool","mute",false},
     {"volume","number","volume",100},{"speed","number","speed",1},
@@ -207,6 +218,10 @@ for _, property in ipairs(properties) do
     mp.observe_property(property[1],property[2],function(_,value)
         if value == nil then value=property[4] end
         state[property[3]]=value
+        if property[3]=="native_select" or property[3]=="native_console" then
+            state.native_tools=state.native_select~=false and state.native_console~=false
+        end
+        if property[3]=="bindings" then require("core.shortcuts").refresh(state,value) end
         if property[3] == "raw_chapters" or property[3] == "duration" then state.chapters=model.chapters(state.raw_chapters,state.duration) end
         if property[3] == "duration" then preview.duration=state.duration end
         if property[3] == "vid" or property[3] == "tracks" then preview:set_video(model.track(state.tracks,"video",state.vid)) end
@@ -228,13 +243,20 @@ mp.register_script_message("menu",function(page)
     if require("ui.menu").titles[page] then player.open_menu(page) end
 end)
 mp.register_script_message("show",show)
-mp.register_script_message("hide",function() state.menu=nil; fade(0) end)
-mp.register_script_message("toggle",function() if visibility_target > 0 then state.menu=nil; fade(0) else show() end end)
+local function hide_controls()
+    if view.cancel_key_capture then view.cancel_key_capture() end
+    state.menu,state.focus,state.focus_group,state.menu_focus=nil,nil,nil,nil
+    input.update_focus()
+    fade(0)
+end
+mp.register_script_message("hide",hide_controls)
+mp.register_script_message("toggle",function() if visibility_target > 0 then hide_controls() else show() end end)
 
 -- File changes cancel old previews; shutdown also restores temporary player settings.
 local function reset_interactions()
     state.menu,state.drag,state.drag_time=nil,nil,nil
-    state.feedback,state.pressed,state.menu_transition=nil,nil,nil
+    state.feedback,state.pressed=nil,nil
+    state.focus,state.focus_group,state.menu_focus=nil,nil,nil
     -- Keep the current control fade; replacing the clock would briefly block playlist buttons.
     animation.menu_page,animation.menu_controls,animation.old_menu,animation.tooltip=nil,nil,nil,nil
 end
@@ -244,12 +266,14 @@ mp.register_event("file-loaded",function()
     if path and not path:match("^%a[%w+.-]*://") and not path:match("^[/\\]") and not path:match("^%a:") then
         path=utils.join_path(mp.get_property("working-directory",""),path)
     end
+    state.path=path
     local video=model.track(mp.get_property_native("track-list",{}),"video",mp.get_property_native("vid"))
     preview:reset(path,mp.get_property_number("duration"),video ~= nil,video and video["ff-index"])
     show()
 end)
 mp.register_event("end-file",function()
     reset_interactions()
+    state.path=nil
     preview:reset(nil,nil)
 end)
 mp.register_event("shutdown",function()

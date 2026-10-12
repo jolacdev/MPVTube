@@ -49,6 +49,24 @@ function M.fit(text, width, size)
     return text
 end
 
+-- Preserve text and UTF-8 exactly; prose prefers spaces, while long tokens can still wrap.
+function M.wrap(text,width,size,word_wrap)
+    local lines,line,used={},"",0
+    for char in tostring(text or ""):gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        local step=advance(char,size)
+        if used+step>width and line~="" then
+            local prefix,carry
+            if word_wrap then prefix,carry=line:match("^(.*%s)(%S*)$") end
+            if prefix and M.text_width(carry,size)+step<=width then
+                lines[#lines+1]=prefix;line,used=carry,M.text_width(carry,size)
+            else lines[#lines+1]=line;line,used="",0 end
+        end
+        line,used=line..char,used+step
+    end
+    if line~="" then lines[#lines+1]=line end
+    return lines
+end
+
 -- Favor human-readable metadata, falling back to the stable MPV track ID.
 function M.track_name(track)
     if not track then return "Off" end

@@ -24,6 +24,11 @@ for executable in (("ffmpeg",) if args.generate_fixtures else ("mpv", "ffmpeg"))
         raise SystemExit(f"Install {executable} and put it on PATH first.")
 if os.name == "nt" and not args.generate_fixtures:
     raise SystemExit("This IPC harness uses Unix sockets; use regression.lua and the README checklist on Windows.")
+input_isolation=["--input-vo-keyboard=no","--input-terminal=no","--input-cursor=no"]
+if not args.generate_fixtures:
+    available=subprocess.check_output(["mpv","--list-options"],text=True)
+    focus=next((line for line in available.splitlines() if line.lstrip().startswith("--focus-on ")),None)
+    input_isolation.append("--focus-on=never" if focus else "--focus-on-open=no")
 
 metadata = OUT / "chapters.ffmeta"
 metadata.write_text(";FFMETADATA1\ntitle=MPVTube · Chapters and Tracks\n" + "".join(
@@ -58,8 +63,23 @@ for extension,codec in (("mp3","libmp3lame"),("wav","pcm_s16le")):
         "-map","0:a:0","-map_metadata","-1","-map_chapters","-1","-c:a",codec,
         "-metadata","title=MPVTube audio fixture",str(audio)],check=True)
     audio_samples.append(audio)
+# Authored ASS fonts, colors and positions must survive startup and export, but strip on request.
+authored_subtitles=OUT / "styled.ass"
+subprocess.run(["ffmpeg","-hide_banner","-loglevel","error","-y","-i",str(captions),
+    "-c:s","ass",str(authored_subtitles)],check=True)
+authored=authored_subtitles.read_text()
+authored=authored.replace("Style: Default,Arial,16,", "Style: Default,Courier New,36,")
+authored=authored.replace("MPVTube: subtitles and track selection work.",
+    r"{\pos(192,50)\c&H00FF00&\i1}Styled ASS captions")
+authored_subtitles.write_text(authored)
+
+# Whole-second frames permit exact 3/10/60/300 second seek checks without a large long-video fixture.
+seek_sample=OUT / "seek-tiers.mkv"
+subprocess.run(["ffmpeg","-hide_banner","-loglevel","error","-y","-f","lavfi",
+    "-i","color=c=0x26323f:s=640x360:r=1","-t","800","-c:v","libx264",
+    "-preset","ultrafast","-crf","40",str(seek_sample)],check=True)
 if args.generate_fixtures:
-    print("Generated:",sample,multi_video,*audio_samples,sep="\n")
+    print("Generated:",sample,multi_video,seek_sample,authored_subtitles,*audio_samples,sep="\n")
     raise SystemExit(0)
 
 
@@ -111,12 +131,29 @@ drawing.new=function(...)
     end
     return canvas
 end
+-- Snapshot state only on request, keeping preview timing free of per-frame IPC writes.
+local ui=require("ui.view")
+local layout=ui.layout
+local last_state,last_options
+ui.layout=function(state,options)
+    last_state,last_options=state,options
+    return layout(state,options)
+end
+mp.register_script_message("test-state",function(token)
+    if not last_state then return end
+    local current=layout(last_state,last_options)
+    mp.set_property_native("user-data/mpvtube-test-state",{token=token,focus=last_state.focus or false,
+        menu=last_state.menu or false,hover=last_state.hover or false,drag=last_state.drag or false,opacity=last_state.opacity,hits=current.hits,panel=current.menu,rows=current.menu and current.menu.rows or {},
+        key_capture=last_state.key_capture or false,key_candidate=last_state.key_candidate or false,keymap_message=last_state.keymap_message or "",
+        keymap_tone=last_state.keymap_tone or "",feedback=last_state.feedback or false,
+        export_ready=last_state.export_ready or false,export_status=last_state.export_status or ""})
+end)
 dofile(source.."/main.lua")
 ''' % json.dumps(str(ROOT / "scripts/mpvtube")))
     with (OUT / "console.log").open("w") as console:
-        process = subprocess.Popen(["mpv", "--no-config", f"--script={script}",f"--osd-fonts-dir={ROOT / 'fonts'}",
+        process = subprocess.Popen(["mpv", "--no-config", *input_isolation, f"--script={script}",f"--osd-fonts-dir={ROOT / 'fonts'}",
             "--force-window=yes", "--idle=yes", "--geometry=1920x1200", "--pause", "--ao=null", "--keep-open=yes",
-            f"--input-ipc-server={ipc}", f"--log-file={logfile}", str(sample)], stdout=console, stderr=console)
+            f"--input-ipc-server={ipc}", f"--log-file={logfile}", f"--script-opts=mpvtube-keymap_path={temp}/keys.json", str(sample)], stdout=console, stderr=console)
         player = None
         try:
             deadline = time.monotonic()+15
@@ -126,7 +163,7 @@ dofile(source.."/main.lua")
             player = Player(ipc)
             player.wait("vo-configured", True, 12)
             player.settle()
-            assert player.get("osc") is False, "stock OSC was not disabled"
+            player.wait("osc",False)
             assert len(player.get("chapter-list")) == 3
             player.command("script-message-to", "mpvtube", "show")
             player.screenshot(OUT / "controls.png")
@@ -182,7 +219,7 @@ dofile(source.."/main.lua")
             player.command("set_property","volume",100)
             player.frames(OUT / "motion-menu-open",lambda:player.command("script-message-to","mpvtube","menu","settings"),(.04,.15))
             player.frames(OUT / "motion-menu-page",lambda:player.command("script-message-to","mpvtube","menu","speed"),(.06,.15,.3))
-            player.frames(OUT / "motion-menu-close",lambda:player.command("keypress","ESC"),(.04,.15))
+            player.frames(OUT / "motion-menu-close",lambda:player.command("keypress","BS"),(.04,.15))
             player.wait("pause",True)
 
             player.mouse(32, h-27, True)
@@ -221,7 +258,7 @@ dofile(source.."/main.lua")
             player.command("seek",0,"absolute+exact")
 
             # One outside click closes settings/submenus, including passive safe-area space.
-            for page,count in (("settings",6),("speed",3)):
+            for page,count in (("settings",7),("speed",3)):
                 for x,y in ((6,h-27),(w-6,h-60),(w/2,h-4),(56,h-27),(6,h/2),(32,h-27)):
                     for button in (0,2):
                         # Left clicks on Play retain their action, so test it with right click only.
@@ -237,23 +274,23 @@ dofile(source.."/main.lua")
             player.mouse(x+100,y+90,True,button=2)
             assert player.menu_is_open(),"right click inside a menu dismissed it"
             player.wait("speed",1)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.mouse(w/2,h/2)  # Let menu dismissal restore the mouse capture area.
             player.mouse(w/2,h/2,True,button=2)
-            player.wait("pause",False)  # MPV's native right-click binding remains outside UI.
+            player.wait("pause",True)  # Unassigned native input has no fallback.
             player.mouse(w/2,h/2,True,button=2)
             player.wait("pause",True)
             player.mouse(32,h-27,True,button=2)
             player.wait("pause",True)
-            player.menu("settings",6,header=False)
+            player.menu("settings",7,header=False)
             player.screenshot(OUT / "menu-before-outside-click.png")
             player.mouse(w/2,h-4,True)
             player.screenshot(OUT / "menu-after-outside-click.png")
             # The gear closes submenus without reopening Settings; other buttons still act.
             player.menu("speed",3)
-            player.mouse(w-178,h-27,True)
+            player.control("settings")
             assert not player.menu_is_open(),"gear reopened settings instead of dismissing the submenu"
-            player.menu("settings",6,header=False)
+            player.menu("settings",7,header=False)
             player.mouse(32,h-27,True)
             assert not player.menu_is_open(),"play button left settings open"
             player.wait("pause",False)
@@ -273,29 +310,66 @@ dofile(source.."/main.lua")
             player.mouse(150,h-27,True)
 
             # Mouse hit testing and real track/speed changes through the menu.
-            player.mouse(w-178, h-27, True)
+            player.control("settings")
             player.screenshot(OUT / "settings.png")
-            player.command("keypress", "ESC")
+            player.command("keypress", "BS")
             player.speed(1.5)
             player.wait("speed", 1.5)
-            player.command("keypress", "ESC")
+            player.command("keypress", "BS")
             player.menu("audio", 2, row=2)
             player.wait("aid", 2)
-            player.command("keypress", "ESC")
+            player.command("keypress", "BS")
             player.command("set_property","sid",1)
-            player.menu("sub", 2, row=1)
+            player.menu("sub", 3, row=1)
             player.wait("sid", 1)
             player.wait("sub-visibility", False)
-            player.command("keypress", "ESC")
+            player.command("keypress", "BS")
             player.command("keypress", "c")
             player.wait("sid", 1)
             player.wait("sub-visibility", True)
-            player.mouse(w-224, h-27, True)
-            player.wait("sub-visibility", False)
+            for control,page in (("cc","sub"),("audio","audio")):
+                player.control(control)
+                player.wait_state("menu",page)
+                player.control(control)
+                player.wait_state("menu",False)
+                player.wait("pause",True)
+                player.wait("sub-visibility",True)
+            player.control("cc")
+            player.wait_state("menu","sub")
+            player.control("caption-options")
+            player.wait_state("menu","captions")
+            player.control("cc")
+            player.wait_state("menu",False)
+            player.control("cc")
+            player.wait_state("menu","sub")
+            player.control("audio")
+            player.wait_state("menu",False)
+            player.control("audio")
+            player.wait_state("menu","audio")
+            player.control("audio")
+            player.wait_state("menu",False)
+            for page in ("settings","speed","caption-font","shortcuts"):
+                for control in ("cc","audio","settings"):
+                    player.menu(page,100,header=page!="settings")
+                    player.control(control)
+                    player.wait_state("menu",False)
+                    player.wait("pause",True)
+                    player.wait("sub-visibility",True)
+            player.control("cc")
+            player.wait_state("menu","sub")
+            player.wait("sub-visibility",True)
+            player.control("row-1")
+            player.wait("sub-visibility",False)
+            assert player.snapshot()["feedback"]["text"]=="Subtitles off"
             player.screenshot(OUT / "cc-off.png")
-            player.mouse(w-224, h-27, True)
-            player.wait("sub-visibility", True)
+            player.close_menu()
+            player.control("cc")
+            player.wait_state("menu","sub")
+            player.control("row-2")
+            player.wait("sub-visibility",True)
+            assert player.snapshot()["feedback"]["text"].startswith("Subtitles: ")
             player.screenshot(OUT / "cc-on.png")
+            player.close_menu()
             assert player.get("sub-pos") < 100, "subtitles must clear the controls"
 
             # Appearance writes reach MPV's subtitle renderer and Reset restores its settings.
@@ -304,27 +378,27 @@ dofile(source.."/main.lua")
                 "sub-border-style","sub-border-size","sub-shadow-offset","sub-border-color","sub-ass-override")
             original_style={name:player.get(name) for name in style_names}
             assert player.get("sub-border-style") == "outline-and-shadow", "default captions have no box"
-            sub_x,sub_y=player.menu("sub",2)
+            sub_x,sub_y=player.menu("sub",3)
             player.mouse(w-40,sub_y+24,True)
             player.screenshot(OUT / "caption-options.png")
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.menu("caption-background-opacity",5,row=4)
             player.wait("sub-border-style","background-box")
             player.wait("sub-back-color","#BF000000")
             player.selected_row(5,4)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.menu("caption-color",8,row=2)
             player.wait("sub-color","#FFFFFF00")
             player.selected_row(8,2)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.menu("caption-opacity",5,row=3)
             player.wait("sub-color","#80FFFF00")
             player.selected_row(5,3)
-            player.command("keypress","ESC")
-            player.menu("caption-size",7,row=4)
-            player.near("sub-font-size",original_style["sub-font-size"]*1.5)
-            player.selected_row(7,4)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
+            player.menu("caption-size",22,row=10)
+            player.near("sub-font-size",original_style["sub-font-size"]*1.05)
+            player.selected_row(22,10)
+            player.command("keypress","BS")
             player.menu("caption-edge",3,row=1)
             player.wait("sub-border-size",0)
             player.selected_row(3,1)
@@ -338,21 +412,21 @@ dofile(source.."/main.lua")
             player.command("set_property","sub-border-size",1.65)
             player.selected_row(3,3)  # Native commands also move the visible checkmark.
             player.screenshot(OUT / "caption-edge-outline.png")
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             for row,font in ((2,"serif"),(3,"monospace"),(4,"cursive"),(1,"sans-serif")):
-                player.menu("caption-font",4,row=row)
+                player.menu("caption-font",5,row=row)
                 player.wait("sub-font",font)
-                player.selected_row(4,row)
+                player.selected_row(5,row)
                 if row==3: player.screenshot(OUT / "caption-font-selected.png")
-                player.command("keypress","ESC")
+                player.command("keypress","BS")
             player.menu("caption-background",8,row=2)
             player.selected_row(8,2)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.screenshot(OUT / "custom-captions.png")
             player.menu("captions",8,row=8)
             for name,value in original_style.items(): player.wait(name,value)
             player.screenshot(OUT / "caption-reset.png")
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.command("set_property","user-data/mpvtube-test-record-checks",False)
 
             # sub-add exercises the same track-list updates used by an SRT drop in MPV.
@@ -362,24 +436,264 @@ dofile(source.."/main.lua")
             player.wait("sid",2)
             assert len([t for t in player.get("track-list") if t["type"]=="sub"]) == 2
             player.wait("sub-text","Subtítulos externos: Español.")
-            player.menu("sub",3)
+            player.command("keypress","v")
+            player.wait("sid",1)
+            player.command("keypress","Alt+v")
+            player.wait("sid",2)
+            player.menu("sub",4)
             player.screenshot(OUT / "external-subtitles.png")
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.menu("caption-background-opacity",5,row=5)
             player.wait("sub-back-color","#FF000000")
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.screenshot(OUT / "external-custom-captions.png")
             player.menu("captions",8,row=8)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.command("sub-remove",2)
             player.command("set_property","sid",1)
             player.wait("sub-visibility",True)
 
-            player.menu("sleep",7,row=2)
-            player.screenshot(OUT / "sleep-timer.png")
+            # New controls use real MPV tracks/properties, and clearing focus releases keys immediately.
+            player.close_menu()
+            player.command("keypress","TAB")
+            player.wait_state("focus","play")
+            player.command("keypress","SPACE")
+            player.wait("pause",False)
+            player.command("keypress","SPACE")
+            player.wait("pause",True)
+            player.screenshot(OUT / "keyboard-focus.png")
+            focused_time=player.get("time-pos")
+            player.command("keypress","Ctrl+RIGHT")
+            player.wait_state("focus","mute")
+            player.position(focused_time)
+            player.command("keypress","HOME")
+            player.wait("volume",0)
+            player.command("keypress","END")
+            player.wait("volume",200)
+            player.command("keypress","BS")
+            player.command("seek",0,"absolute+exact")
+            player.command("keypress","RIGHT")
+            player.position(10)
+            player.command("keypress","TAB")
+            player.wait_state("focus","play")
+            player.mouse(w/2,h/2,True)
+            player.wait_state("focus",False)
+            time.sleep(.35)
+            player.command("set_property","pause",True)
+            player.command("seek",0,"absolute+exact")
+            player.command("keypress","TAB")
+            player.wait_state("focus","play")
+            player.command("script-message-to","mpvtube","hide")
+            player.wait_state("focus",False)
+            player.command("script-message-to","mpvtube","show")
+            for _ in range(24):
+                player.command("keypress","TAB")
+                if player.snapshot()["focus"]=="settings": break
+            else: raise AssertionError("Tab cannot reach settings")
+            player.command("keypress","ENTER")
+            player.wait_state("menu","settings")
+            player.command("keypress","ENTER")
+            player.wait_state("menu","speed")
             player.command("keypress","ESC")
-            player.menu("sleep",7,row=1)
+            player.wait_state("menu","settings")
+            player.close_menu()
+            player.menu("controls",18)
+            actions={row["label"]:row.get("action") for row in player.snapshot()["rows"]}
+            assert all(actions.get(name) for name in ("Mini player","Time remaining","Previous frame","Next frame"))
+            player.command("keypress","HOME")
+            player.wait_state("focus","row-2")
+            player.command("keypress","END")
+            player.wait_state("focus",f"row-{len(player.snapshot()['rows'])}")
+            player.screenshot(OUT / "more-controls.png")
+            player.close_menu()
+            player.command("set_property","volume",195)
+            player.command("keypress","UP")
+            player.wait("volume",200)
+            player.command("keypress","UP")
+            player.wait("volume",200)
+            player.command("set_property","volume-max",150)
+            player.command("set_property","volume",150)
+            player.command("keypress","UP")
+            player.wait("volume",150)
+            player.command("set_property","volume-max",200)
+            player.command("set_property","volume",100)
+            player.command("keypress","b")
+            player.wait("aid",1)
+            player.command("keypress","B")
+            player.wait("aid",2)
+            player.command("keypress","c")
+            player.wait("sub-visibility",False)
+            player.command("keypress","v")
+            player.wait("sub-visibility",True)
+            player.command("keypress","g")
+            player.near("sub-delay",-.05,.001)
+            player.command("keypress","h")
+            player.near("sub-delay",0,.001)
+            player.command("keypress","j")
+            player.near("audio-delay",-.05,.001)
+            player.command("keypress","k")
+            player.near("audio-delay",0,.001)
+            player.command("keypress","h")
+            player.command("keypress","Ctrl+Shift+k")
+            player.near("sub-delay",0,.001)
+            player.screenshot(OUT / "synchronization-feedback.png")
+            player.command("sub-add",str(authored_subtitles),"select")
+            player.wait("sub-text","Styled ASS captions")
+            authored_id=player.get("sid")
+            player.screenshot(OUT / "authored-subtitles.png")
+            player.command("keypress","u")
+            player.wait("sub-ass-override","strip")
+            player.wait("sub-font","Roboto")
+            player.screenshot(OUT / "clean-subtitles.png")
+            player.command("keypress","u")
+            for name,value in original_style.items(): player.wait(name,value)
+            for path in OUT.glob(f"fixture.sub-{authored_id}.*.ass"): path.unlink()
+            player.menu("exports",6,row=3)
+            deadline=time.monotonic()+5
+            while "Exported" not in player.snapshot()["export_status"] and time.monotonic()<deadline: time.sleep(.02)
+            ass_exports=list(OUT.glob(f"fixture.sub-{authored_id}.*.ass"))
+            assert len(ass_exports)==1 and "Courier New" in ass_exports[0].read_text(),"ASS export lost its native authored style"
+            player.close_menu()
+            player.command("sub-remove",authored_id)
+            player.command("set_property","sid",1)
+            player.command("keypress","F1")
+            guide=player.wait_state("menu","shortcuts")
+            assert any(row["value"]=="j" and "audio sync" in row["label"].lower() for row in guide["rows"])
+            player.screenshot(OUT / "shortcut-guide.png")
+            # Exclusive ownership rejects duplicates but allows suspended native assignments.
+            pause_row=next(i+1 for i,row in enumerate(guide["rows"]) if row["label"]=="Play / pause")
+            player.control(f"row-{pause_row}")
+            player.wait_state("menu","binding")
+            player.wait_state("focus","row-3")
+            player.screenshot(OUT / "shortcut-editor.png")
+            player.command("keypress","ENTER")
+            player.wait_state("key_capture",True)
+            for key in ("f",):
+                player.command("keypress",key)
+                status=player.wait_state("keymap_tone","error")
+                assert status["key_capture"] and "Already used" in status["keymap_message"]
+                assert status["key_candidate"] is False and not (Path(temp)/"keys.json").exists()
+            player.screenshot(OUT / "shortcut-conflict.png")
+            player.command("keypress","d")
+            player.wait_state("key_candidate","d")
+            player.wait_state("key_capture",False)
+            player.control("row-3")
             player.command("keypress","ESC")
+            player.wait_state("key_capture",False)
+            player.control("row-3")
+            player.command("keypress","F12")
+            player.wait_state("key_candidate","F12")
+            player.wait_state("focus","row-6")
+            player.screenshot(OUT / "shortcut-ready.png")
+            player.command("keypress","ENTER")
+            player.wait_state("keymap_message","Saved")
+            player.wait_state("focus","row-3")
+            player.screenshot(OUT / "shortcut-saved.png")
+            assert json.loads((Path(temp)/"keys.json").read_text())["keys"]["pause-SPACE"]=="F12"
+            player.close_menu()
+            player.command("keypress","SPACE")
+            time.sleep(.1)
+            player.wait("pause",True)
+            player.command("keypress","F12")
+            player.wait("pause",False)
+            player.command("keypress","F12")
+            player.wait("pause",True)
+            player.control("play",False)
+            assert "F12" in next(hit["tip"] for hit in player.snapshot()["hits"] if hit["id"]=="play")
+            # Reset all restores both a remapped key and an unassigned key, after confirmation.
+            player.command("keypress","F1")
+            guide=player.wait_state("menu","shortcuts")
+            player.menu_row("Mute")
+            player.wait_state("menu","binding")
+            player.control("row-5")
+            player.wait_state("key_candidate","none")
+            player.control("row-6")
+            player.wait_state("keymap_message","Saved")
+            player.close_menu()
+            muted=player.get("mute")
+            player.command("keypress","m")
+            player.wait("mute",muted)
+            player.command("keypress","F1")
+            guide=player.wait_state("menu","shortcuts")
+            player.menu_row("Input diagnostics")
+            diagnostics=player.wait_state("menu","bindings")
+            assert diagnostics["rows"][-1]["pinned"] and "Read-only" in diagnostics["rows"][-1]["label"]
+            player.screenshot(OUT / "input-diagnostics.png")
+            player.control("row-1")
+            details=player.wait_state("menu","binding")
+            assert all(not row.get("action") for row in details["rows"]),"diagnostics must not offer editing commands"
+            assert any(row["label"]=="Owner" for row in details["rows"])
+            player.screenshot(OUT / "input-details.png")
+            player.command("keypress","ESC")
+            guide=player.wait_state("menu","shortcuts")
+            before_reset=(Path(temp)/"keys.json").read_text()
+            player.menu_row("Reset all shortcuts")
+            player.wait_state("menu","shortcut-reset")
+            player.screenshot(OUT / "shortcut-reset.png")
+            player.control("row-2")
+            player.wait_state("menu","shortcuts")
+            assert (Path(temp)/"keys.json").read_text()==before_reset,"cancelled reset changed saved keys"
+            player.menu_row("Reset all shortcuts")
+            player.wait_state("menu","shortcut-reset")
+            player.control("row-1")
+            guide=player.wait_state("menu","shortcuts")
+            player.wait_state("keymap_message","All shortcuts reset")
+            assert json.loads((Path(temp)/"keys.json").read_text())["keys"]=={},"reset must clear overrides while retaining a JSON key dictionary"
+            assert next(row["value"] for row in guide["rows"] if row["label"]=="Play / pause")=="Space"
+            player.screenshot(OUT / "shortcuts-reset-complete.png")
+            player.close_menu()
+            player.command("keypress","F12")
+            player.wait("pause",True)
+            for key,property,value in (("SPACE","pause",False),("SPACE","pause",True),("m","mute",not muted),("m","mute",muted)):
+                player.command("keypress",key)
+                player.wait(property,value)
+            player.menu("settings",100,header=False)
+            assert next(row["shortcut"] for row in player.snapshot()["rows"] if row["label"]=="Shortcut guide")=="F1"
+            player.close_menu()
+            player.control("native-menu")
+            time.sleep(.2)
+            player.screenshot(OUT / "native-menu.png")
+            player.close_native()
+            player.command("keypress","Ctrl+Shift+p")
+            time.sleep(.2)
+            player.screenshot(OUT / "native-properties.png")
+            player.close_native()
+
+            # The owned screenshot action writes to ignored output and announces success.
+            for path in OUT.glob("mpvtube-action-*"): path.unlink()
+            player.command("set_property","screenshot-directory",str(OUT))
+            player.command("set_property","screenshot-template","mpvtube-action-%n")
+            player.command("keypress","s")
+            deadline=time.monotonic()+3
+            while not list(OUT.glob("mpvtube-action-*")) and time.monotonic()<deadline: time.sleep(.02)
+            assert list(OUT.glob("mpvtube-action-*")),"owned screenshot action produced no file"
+            assert player.snapshot()["feedback"]["text"]=="Screenshot saved"
+
+            # Export selected/all embedded streams without transcoding or overwriting existing files.
+            exports=[OUT / "fixture.sub-1.eng.srt",OUT / "fixture.audio-1.eng.m4a",OUT / "fixture.audio-2.spa.m4a"]
+            for path in exports: path.unlink(missing_ok=True)
+            deadline=time.monotonic()+3
+            while not player.snapshot()["export_ready"] and time.monotonic()<deadline: time.sleep(.02)
+            assert player.snapshot()["export_ready"],"FFmpeg export backend did not become ready"
+            player.menu("exports",6,row=3)
+            deadline=time.monotonic()+5
+            while "Exported" not in player.snapshot()["export_status"] and time.monotonic()<deadline: time.sleep(.02)
+            assert "MPVTube: subtitles" in exports[0].read_text()
+            player.menu("exports",6)  # close
+            player.menu("exports",6,row=6)
+            deadline=time.monotonic()+5
+            while player.snapshot()["export_status"]!="Exported 2 track(s)" and time.monotonic()<deadline: time.sleep(.02)
+            assert player.snapshot()["export_status"]=="Exported 2 track(s)"
+            for path in exports[1:]:
+                probe=json.loads(subprocess.check_output(["ffprobe","-v","error","-show_streams","-of","json",str(path)]))
+                assert len(probe["streams"])==1 and probe["streams"][0]["codec_name"]=="aac"
+            saved=exports[0].read_bytes()
+            player.menu("exports",6)
+            player.menu("exports",6,row=3)
+            assert player.snapshot()["export_status"].startswith("File exists:")
+            assert exports[0].read_bytes()==saved,"existing export was modified"
+            player.screenshot(OUT / "export-tracks.png")
+            player.close_menu()
 
             # Timeline click, drag with exact release, chapter menu, and keyboard seeks.
             w, h, scale = player.dimensions()
@@ -396,21 +710,21 @@ dofile(source.."/main.lua")
             player.command("set_property","pause",True)
             assert abs(player.get("time-pos")-8) < .4, "chapter selection"
             player.screenshot(OUT / "chapter-selection.png")
-            player.command("keypress","ESC")
-            player.command("keypress", "l")
+            player.command("keypress","BS")
+            player.command("keypress", "RIGHT")
             player.position(18)
             player.command("keypress", "0")
             player.position(0)
 
             # Arrow presses render signed chevrons; opposite directions start a new label.
             player.command("keypress","RIGHT")
-            player.position(5)
+            player.position(10)
             player.screenshot(OUT / "seek-right.png")
             player.command("keypress","RIGHT")
-            player.position(10)
+            player.position(20)
             player.screenshot(OUT / "seek-right-repeat.png")
             player.command("keypress","LEFT")
-            player.position(5)
+            player.position(10)
             player.screenshot(OUT / "seek-left.png")
             player.command("keypress","0")
             player.position(0)
@@ -447,14 +761,14 @@ dofile(source.."/main.lua")
             player.command("keypress","ENTER")
             player.near("speed",.9)
             player.wait("volume",before_navigation_volume)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.command("set_property","speed",1)
 
             # Check intermediate rates before release, including reversals and dragging outside the track.
             player.speed_drag((1,1.5,.5,1.75,.75,2.2,.1,1.15))
             player.screenshot(OUT / "speed-drag.png")
             for name,value in drag_policy.items(): player.wait(name,value)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.command("set_property","speed",1)
 
             # Continuous movement across samples must show new images without a settling delay.
@@ -471,13 +785,13 @@ dofile(source.."/main.lua")
             time.sleep(.3)
             player.screenshot(OUT / "volume.png")
             player.mouse(130, h-27, True)
-            assert 40 <= player.get("volume") <= 60, "volume slider"
+            assert 90 <= player.get("volume") <= 110, "volume slider"
             player.mouse(130, h-27)
             player.command("keydown", "MBTN_LEFT")
             player.mouse(155, h-27)
             player.command("keyup", "MBTN_LEFT")
             time.sleep(.15)
-            assert player.get("volume") > 85, "volume drag"
+            assert player.get("volume") > 170, "volume drag"
             player.screenshot(OUT / "volume-slider-no-feedback.png")
             player.mouse(83, h-27, True)
             player.wait("mute", True)
@@ -488,7 +802,7 @@ dofile(source.."/main.lua")
             player.mouse(130,h-27,True)
             player.wait("mute", False)
 
-            # Both alternate window modes must restore size, border, and pinning.
+            # Mini player must restore size, border, and pinning.
             player.mouse(w/2, h/2)
             size = player.get("current-window-scale")
             border, ontop = player.get("border"), player.get("ontop")
@@ -500,13 +814,6 @@ dofile(source.."/main.lua")
             player.wait("border", border)
             player.near("current-window-scale",size)
             player.settle()
-            player.command("keypress", "t")
-            time.sleep(.25)
-            player.command("keypress", "t")
-            time.sleep(.25)
-            player.near("current-window-scale",size)
-            player.settle()
-
             # Fullscreen button and double-click must both toggle the actual window.
             w,h,_=player.dimensions()
             player.mouse(w-40,h-27,True)
@@ -540,12 +847,12 @@ dofile(source.."/main.lua")
             player.wait("pause", True)
             player.command("script-message-to", "mpvtube", "show")
             time.sleep(.2)
-            player.menu("settings",8,row=5,header=False)
+            player.menu("settings",9,row="Autoplay",header=False)
             player.wait("keep-open","always")
-            player.menu("settings",8,header=False)  # close the currently open settings
-            player.menu("settings",8,row=5,header=False)
+            player.menu("settings",9,header=False)  # close the currently open settings
+            player.menu("settings",9,row="Autoplay",header=False)
             player.wait("keep-open",True)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
 
             # Real VO resizing, hover transitions, tooltips, and scrollable menus.
             for width,height in [(1280,800),(800,500),(600,360),(1920,1200)]:
@@ -559,19 +866,25 @@ dofile(source.."/main.lua")
                 player.mouse(32,h-27,True)
                 player.wait("pause",True)
                 if w<540:
+                    player.command("keypress","Ctrl+Shift+k")
+                    player.screenshot(OUT / f"compact-feedback-{width}.png")
                     player.mouse(w-70,h-28,True)
                     player.screenshot(OUT / f"compact-expanded-{width}.png")
-                    slots=6 if w>=400 else 5
-                    cc_slot=3 if slots==6 else 2
+                    slots=5
+                    cc_slot=3
                     cc_x=w-12-(slots*36+8)+4+(cc_slot-.5)*36
                     player.mouse(cc_x,h-28,True)
+                    player.wait_state("menu","sub")
+                    player.wait("sub-visibility",True)
+                    player.control("row-1")
                     player.wait("sub-visibility",False)
-                    player.mouse(cc_x,h-28,True)
+                    player.close_menu()
+                    player.command("keypress","c")
                     player.wait("sub-visibility",True)
                     player.mouse(w-slots*36+2,h-28,True)
                     player.screenshot(OUT / f"compact-collapsed-{width}.png")
                 player.speed_drag((1,1.5,.5,2.2,.1,1.25))
-                player.command("keypress","ESC")
+                player.command("keypress","BS")
                 player.command("set_property","speed",1)
                 player.wait("speed",1)
                 x,y=player.menu("speed",3)
@@ -579,22 +892,18 @@ dofile(source.."/main.lua")
                 for _ in range(8):
                     player.command("keypress","WHEEL_DOWN")
                 time.sleep(.15)
-                cap=max(1,int((h-100-57-16)/48))
-                panel_width=min(320,w-24)
-                button_width=(panel_width-56)/4
-                preset_x=w-panel_width-12+16+3*(button_width+8)+button_width/2
-                player.mouse(preset_x,y+57+8+(min(3,cap)-.5)*48,True)
+                player.control("speed-2")
                 player.wait("speed",2)
                 assert player.get("volume")==before_scroll_volume,"wheel over menu must scroll, not change volume"
-                player.command("keypress","ESC")
+                player.close_menu()
 
             # Let playback auto-hide, then stop: no stale preview, menu, or Lua errors.
             player.mouse(w/2, h/2)
-            player.command("keypress", "k")
+            player.command("keypress", "SPACE")
             player.wait("pause", False)
-            time.sleep(3.5)
+            player.wait("sub-pos",100,6)
             player.screenshot(OUT / "hidden.png")
-            assert player.get("sub-pos") == 100, "subtitle position must restore after auto-hide"
+            assert player.snapshot()["opacity"]<.1,"controls did not auto-hide"
 
             # A file with no embedded captions must gain CC as soon as an external SRT arrives.
             plain=OUT / "without-subtitles.mkv"
@@ -609,15 +918,15 @@ dofile(source.."/main.lua")
             player.command("sub-add",str(external),"select")
             player.wait("sid",1)
             player.wait("sub-text","Subtítulos externos: Español.")
-            player.menu("sub",2)
+            player.menu("sub",3)
             player.screenshot(OUT / "external-only-subtitles.png")
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.menu("caption-color",8,row=3)
             player.wait("sub-color","#FF00FF00")
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             player.screenshot(OUT / "external-only-custom.png")
             player.menu("captions",8,row=8)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
 
             # Long chapter lists open around the current chapter, then scroll to later entries.
             long_metadata=OUT / "long-chapters.ffmeta"
@@ -637,7 +946,7 @@ dofile(source.."/main.lua")
             player.position(20)
             player.wait("chapter",40)
             chapter_x,chapter_y=player.menu("chapters",48)
-            visible=max(1,int((h-100-57-16)/48))
+            visible=player.snapshot()["panel"]["visible"]
             player.screenshot(OUT / "long-chapters.png")
             player.mouse(chapter_x+100,chapter_y+57+8+24,True)
             player.wait("pause",False)
@@ -648,7 +957,7 @@ dofile(source.."/main.lua")
             player.wait("pause",False)
             player.command("set_property","pause",True)
             player.position(23.5)
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
 
             # Changing files during a held gesture restores the prior rate and consumes release.
             player.command("seek",0,"absolute+exact")
@@ -680,7 +989,7 @@ dofile(source.."/main.lua")
             player.wait("vid",2)
             video=next(track for track in player.get("track-list") if track["type"]=="video" and track["id"]==2)
             assert video["ff-index"]==2
-            player.command("keypress","ESC")
+            player.command("keypress","BS")
             time.sleep(.3)
             uploads=preview_uploads(logfile)
             log_offset=len(logfile.read_text(errors="replace"))
@@ -710,6 +1019,20 @@ dofile(source.."/main.lua")
                 player.wait("pause",True)
                 player.mouse(150,h-27,True)
 
+            player.command("loadfile",str(seek_sample),"replace")
+            player.wait("path",str(seek_sample))
+            player.command("set_property","pause",True)
+            player.command("seek",20,"absolute+exact")
+            player.position(20)
+            player.command("keypress","Shift+RIGHT")
+            player.position(23)
+            player.command("keypress","Ctrl+RIGHT")
+            player.position(83)
+            player.command("keypress","Shift+LEFT")
+            player.position(80)
+            player.command("keypress","Ctrl+LEFT")
+            player.position(20)
+
             # Audio-only media keeps playback controls usable without invented video/CC/previews.
             for audio in audio_samples:
                 player.command("loadfile",str(audio),"replace")
@@ -719,26 +1042,31 @@ dofile(source.."/main.lua")
                 player.command("set_property","pause",True)
                 tracks=player.get("track-list")
                 assert all(track["type"]=="audio" for track in tracks),"audio fixture gained a video/subtitle track"
+                player.command("keypress",".")
+                deadline=time.monotonic()+2
+                while (player.snapshot()["feedback"] or {}).get("text")!="No video frames" and time.monotonic()<deadline: time.sleep(.01)
+                assert player.snapshot()["feedback"]["text"]=="No video frames"
                 assert player.get("chapter-list")==[],"audio fixture retained video chapters"
                 player.near("duration",24,.1)
+                # Paused audio position follows decoded packet/buffer boundaries, rather than video frames.
                 player.command("seek",10,"absolute+exact")
-                player.position(10)
+                player.position(10,.5)
                 player.command("keypress","RIGHT")
-                player.position(15)
+                player.position(20,.5)
                 player.speed(1.5)
                 player.wait("speed",1.5)
-                player.command("keypress","ESC")
+                player.command("keypress","BS")
                 player.command("keypress","DOWN")
                 player.command("keypress","m")
                 player.wait("mute",True)
                 player.command("keypress","m")
                 player.wait("mute",False)
-                player.command("keypress","k")
+                player.command("keypress","SPACE")
                 player.wait("pause",False)
                 before=player.get("time-pos")
                 time.sleep(.3)
                 assert player.get("time-pos")>before,"audio playback clock did not advance"
-                player.command("keypress","k")
+                player.command("keypress","SPACE")
                 player.wait("pause",True)
                 player.command("set_property","speed",1)
                 time.sleep(1)
@@ -748,7 +1076,7 @@ dofile(source.."/main.lua")
                 assert preview_uploads(logfile)==uploads,"audio-only hover uploaded a video thumbnail"
                 player.menu("info",5)
                 player.screenshot(OUT / f"audio-{audio.suffix[1:]}-info.png")
-                player.command("keypress","ESC")
+                player.command("keypress","BS")
             player.command("stop")
             player.wait("idle-active", True)
             player.wait("cursor-autohide",cursor_policy)
@@ -758,7 +1086,7 @@ dofile(source.."/main.lua")
             for face in ("Roboto-Regular","Roboto-Medium","Roboto-Bold","Roboto-Black"):
                 assert face in font_selections,f"UI font did not resolve to {face}"
             print(f"Preview latency: cold {cold_preview*1000:.0f}ms, cached {warm_preview*1000:.0f}ms")
-            print("Passed native MPV integration: Roboto font weights, bottom safe area, time toggle, ten-hour timestamps, MP3/WAV audio-only playback, native cursor, caption styles, external SRT, sleep timer, feedback, menus, tracks, seeks, continuous previews, shortcuts, window modes, playlist, auto-hide, idle.")
+            print("Passed native MPV integration: Roboto font weights, bottom safe area, time toggle, ten-hour timestamps, MP3/WAV audio-only playback, native cursor, caption styles, external SRT, clean subtitle override, exports, keyboard focus, feedback, menus, tracks, seeks, continuous previews, shortcuts, window modes, playlist, auto-hide, idle.")
         finally:
             if player:
                 try:
@@ -771,3 +1099,109 @@ dofile(source.."/main.lua")
             except subprocess.TimeoutExpired:
                 process.terminate()
                 process.wait(timeout=5)
+
+    # Small isolated launches verify ownership, persisted keys and absent optional helpers.
+    native_input=Path(temp)/"input.conf"
+    native_input.write_text("SPACE set volume 77\nc set volume 43\nd set volume 37\nMBTN_LEFT cycle pause\n")
+    empty_keys={row["action"]["id"]:"none" for row in guide["rows"] if row.get("action",{}).get("shortcut")=="select"}
+    for policy in ("mpvtube","compatible","exclusive","empty"):
+        profile_ipc=Path(temp)/f"{policy}.sock"
+        keymap=Path(temp)/f"{policy}.json"
+        keys=empty_keys if policy=="empty" else {"pause-SPACE":"F12","mute-m":"none"}
+        keymap.write_text(json.dumps({"version":1,"keys":keys}))
+        profile_log=OUT/f"policy-{policy}.log"
+        with profile_log.open("w") as console:
+            process=subprocess.Popen(["mpv","--no-config",*input_isolation[:3],"--force-window=yes",f"--script={script}",f"--osd-fonts-dir={ROOT/'fonts'}",
+                f"--input-conf={native_input}",f"--input-ipc-server={profile_ipc}","--pause","--ao=null","--geometry=960x600",
+                f"--script-opts=mpvtube-keymap_path={keymap},mpvtube-shortcut_policy={'mpvtube' if policy=='empty' else policy},mpvtube-volume_step=2,mpvtube-sync_step=0.025,mpvtube-ffmpeg_path=/mpvtube-missing-ffmpeg",str(sample)],
+                stdout=console,stderr=console)
+            player=None
+            try:
+                deadline=time.monotonic()+15
+                while not profile_ipc.exists() and time.monotonic()<deadline:
+                    assert process.poll() is None,"Ownership profile failed to start"
+                    time.sleep(.05)
+                player=Player(profile_ipc)
+                player.wait("vo-configured",True,12)
+                w,h,_=player.settle()
+                player.mouse(6,h-4,True)
+                player.wait("pause",True)
+                if policy=="empty":
+                    initial={name:player.get(name) for name in ("time-pos","volume","mute","sub-visibility","pause")}
+                    for key in ("SPACE","c","d","m","RIGHT","F12","0"):
+                        player.command("keypress",key)
+                    time.sleep(.2)
+                    for name,value in initial.items(): player.wait(name,value)
+                    player.control("play")
+                    player.wait("pause",False)
+                    player.control("play")
+                    player.wait("pause",True)
+                    print("Passed entirely unassigned keyboard with working pointer controls")
+                    continue
+                player.command("keypress","F12")
+                player.wait("pause",False)
+                player.command("keypress","F12")
+                player.wait("pause",True)
+                player.command("keypress","SPACE")
+                time.sleep(.1)
+                player.wait("pause",True)
+                player.wait("volume",77 if policy=="compatible" else 100)
+                player.command("keypress","m")
+                time.sleep(.1)
+                player.wait("mute",policy=="compatible")
+                player.command("set_property","sid",1)
+                player.wait("sid",1)
+                player.command("keypress","c")
+                if policy=="compatible": player.wait("volume",43)
+                else: player.wait("sub-visibility",False)
+                player.command("set_property","volume",100)
+                player.command("keypress","d")
+                player.wait("volume",37 if policy=="compatible" else 100)
+                if policy=="mpvtube":
+                    player.command("keypress","UP")
+                    player.wait("volume",102)
+                    player.command("keypress","WHEEL_UP")
+                    player.wait("volume",104)
+                    player.command("keypress","g")
+                    player.near("sub-delay",-.025,.001)
+                    player.menu("sync",7,row="Subtitle earlier")
+                    player.near("sub-delay",-.05,.001)
+                    player.close_menu()
+                player.mouse(w*.5,h-59)
+                assert not player.snapshot()["export_ready"]
+                player.menu("settings",8,header=False)
+                rows=player.snapshot()["rows"]
+                export_row=next((i+1,row) for i,row in enumerate(rows) if row["label"]=="Export tracks")
+                assert export_row[1]["disabled"] and not export_row[1].get("action")
+                player.close_menu()
+                player.menu("settings",8,row=export_row[0],header=False)
+                player.screenshot(OUT/f"missing-ffmpeg-{policy}.png")
+                player.close_menu()
+                player.command("keypress","Ctrl+p")
+                time.sleep(.1)
+                player.close_native()
+                player.command("keypress","F1")
+                guide=player.wait_state("menu","shortcuts")
+                if policy in ("mpvtube","compatible"):
+                    saved_keymap=keymap.read_text()
+                    if policy=="mpvtube": keymap.write_text(saved_keymap+"\n")
+                    player.menu_row("Reset all shortcuts")
+                    player.wait_state("menu","shortcut-reset")
+                    player.control("row-1")
+                    error=player.wait_state("keymap_tone","error")
+                    assert ("changed or unreadable" if policy=="mpvtube" else "Already used") in error["keymap_message"]
+                    assert keymap.read_text()==saved_keymap+("\n" if policy=="mpvtube" else ""),"failed reset overwrote saved keys"
+                    player.close_menu()
+                    player.command("keypress","F12")
+                    player.wait("pause",False)
+                    player.command("keypress","F12")
+                    player.wait("pause",True)
+                print(f"Passed {policy} ownership, persisted keys and disabled FFmpeg actions")
+            finally:
+                if player:
+                    try:player.command("quit")
+                    except (OSError,RuntimeError):pass
+                    player.sock.close()
+                try:process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.terminate();process.wait(timeout=5)

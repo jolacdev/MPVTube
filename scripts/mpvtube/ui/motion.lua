@@ -1,7 +1,7 @@
 -- Shared CSS-style easing and interruptible numeric transitions; no MPV dependencies.
 local clamp = require("core.model").clamp
 local M = {duration={hover=0.2,volume=0.2,timeline=0.2,gear=0.1,toggle=0.2,track=0.08,expand=0.3,
-    wave=0.25,menu=0.1,panel=0.25,tooltip=0.2,feedback=1,seek=1.2,seek_move=0.35,seek_fade=0.1}}
+    wave=0.25,tooltip=0.2,feedback=1,seek=1.2,seek_move=0.35,seek_fade=0.1}}
 local curves = {modern={0.05,0,0,1},enter={0,0,0.2,1},leave={0.4,0,1,1},standard={0.4,0,0.2,1}}
 
 -- CSS maps time through the curve's x coordinate, then reads its y coordinate.
@@ -49,7 +49,7 @@ function Animator:finish()
     return self.active
 end
 
--- YouTube's modern feedback grows/fades for 250 ms, holds, then shrinks/fades out.
+-- Shared feedback grows/fades for 250 ms, holds, then shrinks/fades out.
 function M.feedback(item,now)
     local age=now-item.start
     if item.kind == "seek" then

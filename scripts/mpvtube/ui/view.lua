@@ -9,7 +9,7 @@ local spacing=draw.metrics
 
 -- The capsule, its revealed slider and a captured drag share one hover decision.
 function M.volume_hover(state,layout)
-    return state.drag == "volume" or state.hover == "mute" or state.hover == "volume" or
+    return state.drag == "volume" or state.focus == "mute" or state.hover == "mute" or state.hover == "volume" or
         layout and state.mouse_inside and contains(layout.volume_pill,state.mx,state.my)
 end
 
@@ -21,7 +21,7 @@ function M.layout(state, options)
     local layout = {hits={},buttons={},pills={},timeline={x=spacing.inset,y=h-68,
         w=math.max(1,w-2*spacing.inset),h=20},cy=cy}
     local function hit(id, x, y, width, height, tip, action)
-        local area = {id=id, x=x, y=y, w=width, h=height, tip=tip, action=action}
+        local area = {id=id, x=x, y=y, w=width, h=height, tip=require("core.shortcuts").tip(state,action,tip), action=action}
         layout.hits[#layout.hits+1] = area
         return area
     end
@@ -45,7 +45,7 @@ function M.layout(state, options)
         return start
     end
     -- Pack essential controls from the left; hide extras as the window narrows.
-    button("play", state.pause and "play" or "pause", pill(40), 40, state.pause and "Play (k)" or "Pause (k)", {kind="pause"})
+    button("play", state.pause and "play" or "pause", pill(40), 40, state.pause and "Play (Space)" or "Pause (Space)", {kind="pause"})
     if #state.playlist > 1 and w >= 640 then
         local previous = state.playlist_pos > 0
         local width = previous and 80 or 40
@@ -59,51 +59,71 @@ function M.layout(state, options)
             x = start+40+spacing.gap
         end
     end
+    if w>=1360 then
+        local start=pill(80)
+        local _,chapter_index=model.chapter_at(state.chapters,state.time)
+        for _,entry in ipairs({{"chapter-previous","chapter_previous",-1,chapter_index and chapter_index>1},
+            {"chapter-next","chapter_next",1,chapter_index and chapter_index<#state.chapters}}) do
+            local control=button(entry[1],entry[2],start+(entry[3]>0 and 40 or 0),40,entry[3]>0 and "Next chapter (])" or "Previous chapter ([)",
+                entry[4] and {kind="chapter-step",value=entry[3]} or nil)
+            control.enabled=not not entry[4]
+        end
+    end
     local expand = compact and 0 or (state.volume_expand or 0)
     local volume_x = pill(40+71*expand)
     button("mute", (state.mute or state.volume <= 0) and "muted" or state.volume <= 50 and "volume_low" or "volume", volume_x, 40, state.mute and "Unmute (m)" or "Mute (m)", {kind="mute"})
     layout.volume = {x=volume_x+40, y=cy-20, w=52*expand, h=40}
     layout.volume_pill = layout.pills[#layout.pills]
-    layout.volume_pill.id="mute"
-    if expand > 0.8 then hit("volume", layout.volume.x, layout.volume.y, layout.volume.w, 40, "Volume", {kind="volume"}) end
+    layout.volume_pill.id,layout.volume_pill.action="mute",{kind="mute"}
+    if expand > 0.8 then hit("volume", layout.volume.x, layout.volume.y, layout.volume.w, 40, string.format("Volume: %.0f%%",state.volume), {kind="volume"}) end
 
-    local right = {{id="fullscreen", icon=state.fullscreen and "exit_fullscreen" or "fullscreen", tip=state.fullscreen and "Exit full screen (f)" or "Full screen (f)", action={kind="fullscreen"}}}
-    if not state.fullscreen and (not compact or state.controls_expanded) and options.theater then
-        table.insert(right, 1, {id="theater", icon=state.theater and "theater_active" or "theater", tip="Theater mode (t)", action={kind="theater"}, active=state.theater})
+    local right={}
+    local function control(item) right[#right+1]=item end
+    if #state.playlist>1 and w>=1000 then
+        control({id="autoplay",icon="play",tip="Autoplay",action={kind="autoplay"},toggle=state.keep_open~="always"})
     end
-    if not state.fullscreen and w >= 760 and options.pip then
-        table.insert(right, 1, {id="pip", icon="pip", tip="Mini player (i)", action={kind="pip"}, active=state.pip})
+    -- Small arrows flank one recognizable track icon instead of repeating that icon three times.
+    for _,kind in ipairs({"sub","audio"}) do
+        local count=#model.tracks(state.tracks,kind)
+        local function arrow(direction)
+            control({id=kind..(direction<0 and "-previous" or "-next"),icon=direction<0 and "left" or "right",width=24,size=16,
+                tip=(direction<0 and "Previous " or "Next ")..(kind=="sub" and "subtitle" or "audio").." track",enabled=count>1,
+                action=count>1 and {kind="track-step",track=kind,value=direction} or nil})
+        end
+        if w>=900 then arrow(-1) end
+        local enabled=count>0 and state.sub_visibility and state.sid~="no" and state.sid~=false
+        control({id=kind=="sub" and "cc" or "audio",icon=kind=="sub" and (enabled and "cc_active" or "cc") or "audio",
+            tip=kind=="sub" and "Subtitles/CC" or "Audio track",enabled=count>0,
+            action=count>0 and {page=kind} or nil,active=kind=="sub" and enabled,dismiss_menu=true})
+        if w>=900 then arrow(1) end
     end
-    table.insert(right, 1, {id="settings", icon="settings", tip="Settings", action={page="settings"}, active=state.menu ~= nil})
-    if not compact or state.controls_expanded then
-        local available=#model.tracks(state.tracks,"sub") > 0
-        local enabled=available and state.sub_visibility and state.sid ~= "no" and state.sid ~= false
-        table.insert(right, 1, {id="cc", icon=enabled and "cc_active" or "cc",
-            tip=available and "Subtitles/CC (c)" or "Subtitles unavailable",enabled=available,
-            action=available and {kind="subtitles"} or nil,active=enabled})
+    control({id="settings",icon="settings",tip="Settings",action={page="settings"},active=state.menu~=nil,dismiss_menu=true})
+    if not state.fullscreen and w>=760 and options.pip then
+        control({id="pip",icon="pip",tip="Mini player",action={kind="pip"},active=state.pip})
     end
-    if #state.playlist > 1 and (w >= 1000 or compact and state.controls_expanded and w >= 400) then
-        table.insert(right, 1, {id="autoplay", icon="play", tip="Autoplay", action={kind="autoplay"}, toggle=state.keep_open ~= "always"})
-    end
-    -- The smallest player replaces extra controls with an expandable strip on the same row.
+    control({id="fullscreen",icon=state.fullscreen and "exit_fullscreen" or "fullscreen",
+        tip=state.fullscreen and "Exit full screen" or "Full screen",action={kind="fullscreen"}})
     if compact then
+        local by_id={}
+        for _,item in ipairs(right) do by_id[item.id]=item end
         local expand={id="expand",icon=state.controls_expanded and "right" or "left",
             tip=state.controls_expanded and "Close" or "Expand",action={kind="expand"}}
-        if state.controls_expanded then table.insert(right,1,expand)
-        else right={expand,{id="settings",icon="settings",tip="Settings",action={page="settings"},active=state.menu ~= nil}} end
+        right=state.controls_expanded and {expand,by_id.audio,by_id.cc,by_id.settings,by_id.fullscreen} or {expand,by_id.settings}
     end
-    -- Reserve the right capsule first; chapters use only the remaining middle space.
-    local slot_width=compact and 36 or 48
-    local right_w = #right*slot_width+8
-    local right_x = w-spacing.inset-right_w
-    layout.pills[#layout.pills+1] = {x=right_x, y=cy-20, w=right_w, h=40}
-    for index, control in ipairs(right) do
-        local area = button(control.id,control.icon,right_x+4+(index-1)*slot_width,slot_width,control.tip,control.action,control.active)
+    local right_w=8
+    for _,item in ipairs(right) do right_w=right_w+(compact and 36 or item.width or 48) end
+    local right_x=w-spacing.inset-right_w
+    layout.pills[#layout.pills+1]={x=right_x,y=cy-20,w=right_w,h=40}
+    local control_x=right_x+4
+    for _,item in ipairs(right) do
+        local width=compact and 36 or item.width or 48
+        local area=button(item.id,item.icon,control_x,width,item.tip,item.action,item.active)
+        area.icon_size=item.size or 24
         if compact then area.y,area.h,area.icon_size=cy-16,32,20 end
-        area.toggle = control.toggle
-        area.enabled = control.enabled
-        area.hover_width = slot_width
-        area.hover_height=spacing.control_height-2*spacing.hover_inset
+        area.toggle,area.enabled=item.toggle,item.enabled
+        area.dismiss_menu=item.dismiss_menu
+        area.hover_width,area.hover_height=width,spacing.control_height-2*spacing.hover_inset
+        control_x=control_x+width
     end
     -- Size time from its current label, then fall back to current-only text if space is tight.
     if w >= 370 and not (compact and state.controls_expanded) then
@@ -118,7 +138,7 @@ function M.layout(state, options)
         if time_x+width+8 <= right_x then
             x=time_x
             local start=pill(width)
-            layout.time=hit("time",start,cy-20,width,40,nil,state.duration and {kind="time"} or nil)
+            layout.time=hit("time",start,cy-20,width,40,"Elapsed / remaining time",state.duration and {kind="time"} or nil)
             layout.time.text=label
             x=x-(compact and 0 or 4)
         end
@@ -129,20 +149,19 @@ function M.layout(state, options)
         local cw = math.min(342,model.text_width(chapter.title,13)+52,available)
         local start = pill(cw)
         layout.chapter = {x=start+16, width=math.max(0,cw-48), title=chapter.title,button_x=start,button_width=cw}
-        layout.chapter.area=hit("chapter",start,cy-20,cw,40,"View chapter",{page="chapters"})
+        layout.chapter.area=hit("chapter",start,cy-20,cw,40,"Chapters",{page="chapters"})
         layout.buttons[#layout.buttons+1] = {id="chapter-arrow", x=start+cw-32, y=cy-20, w=26, h=40, icon="right",icon_size=20}
     end
-    local center_page = #state.chapters > 0 and "chapters" or #state.playlist > 1 and "playlist" or nil
-    if center_page and state.fullscreen and w >= 1000 and x+52 < w/2-24 and right_x > w/2+24 then
-        layout.pills[#layout.pills+1] = {x=w/2-20,y=cy-20,w=40,h=40}
-        button("browse", "up", w/2-20, 40, menu.titles[center_page], {page=center_page})
-    end
     if options.title and w > 360 then
-        if state.fullscreen then layout.title = {x=24, y=34, width=w-100} end
+        if state.fullscreen then layout.title = {x=24, y=34, width=w-144} end
         layout.info = true
         layout.info_area=hit("info",w-46,10,32,32,"Video information",{page="info"})
-        layout.info_area.hover_inset=0
+        layout.info_area.hover_inset,layout.info_area.top=0,true
     end
+    -- Top tools reuse button drawing, hover and focus; they do not occupy the playback bar.
+    local native=button("native-menu","native_menu",w-46-(layout.info and 44 or 0),32,"MPV menu (Ctrl+P)",state.native_tools~=false and {kind="native-menu"} or nil)
+    native.y,native.h,native.icon_size,native.hover_inset,native.top=10,32,24,0,true
+    native.enabled=state.native_tools~=false
 
     -- Fit and scroll rows within the window; append menu hits last so they take priority.
     if state.menu then
@@ -150,15 +169,17 @@ function M.layout(state, options)
         local panel = menu.geometry(state,options)
         layout.menu = panel
         hit("menu", panel.x, panel.y, panel.w, panel.h)
-        if state.menu ~= "settings" then hit("back",panel.x+8,panel.y+12,32,32,nil,{page=menu.parent(state.menu)}) end
-        if state.menu == "sub" then hit("caption-options",panel.x+panel.w-76,panel.y+8,68,40,nil,{page="captions"}) end
-        for i = 1, panel.visible do
-            local index = panel.offset+i
+        if state.menu ~= "settings" then hit("back",panel.x+8,panel.y+(panel.header-30)/2,32,30,nil,{page=menu.parent(state.menu)}) end
+        if state.menu == "sub" then hit("caption-options",panel.x+panel.w-76,panel.y,68,panel.header,nil,{page="captions"}) end
+        for i = 1, panel.visible+panel.pinned do
+            local pinned=i>panel.visible
+            local index=pinned and #panel.rows or panel.offset+i
             local row = panel.rows[index]
             local area=hit("row-"..index,panel.x+panel.padding,panel.y+panel.header+panel.padding+(i-1)*panel.row_h,
-                panel.w-2*panel.padding,panel.row_h,nil,row.action)
+                panel.w-2*panel.padding,pinned and panel.footer_h or panel.row_h,nil,row.action)
             area.row,area.index = row,index
             area.hover_inset,area.hover_radius=0,0
+            area.pinned=pinned
             if row.kind == "speed-slider" then
                 local center_y=area.y+24
                 layout.speed={x=panel.x+64,y=center_y-12,w=panel.w-128,h=24}
@@ -180,23 +201,11 @@ function M.layout(state, options)
         -- Page rows have separate animation keys; opening a menu does not restart bar hovers.
         for index=first_menu_hit,#layout.hits do layout.hits[index].group=state.menu end
     end
-    layout.menu_transition=state.menu_transition
     return layout
 end
 
--- Input and rendering share the same deadline for moving panel capture.
-function M.active_transition(layout,now)
-    local transition=layout and layout.menu_transition
-    return transition and (not now or now < transition.deadline) and transition or nil
-end
-
 -- Reverse paint order makes the topmost menu/control receive an overlapping click.
-function M.hit(layout,x,y,now)
-    -- YouTube suppresses panel clicks during page slides; bottom controls stay usable.
-    local transition=M.active_transition(layout,now)
-    if transition and (contains(transition,x,y) or contains(layout.menu,x,y)) then
-        return {id="menu",action=nil}
-    end
+function M.hit(layout,x,y)
     for i = #layout.hits, 1, -1 do
         if contains(layout.hits[i], x, y) then return layout.hits[i] end
     end
@@ -269,10 +278,10 @@ end
 
 
 -- Seeks use signed labels and rounded chevrons at the edges; other feedback stays centered.
-local function feedback(canvas, state, options)
+local function feedback(canvas, state, options, controls)
     local feedback_item = state.feedback
     if not feedback_item or feedback_item.opacity <= 0 then return end
-    local feedback_canvas = draw.new(feedback_item.opacity,options.font)
+    local feedback_canvas = draw.new(feedback_item.opacity,options.font,nil,state)
     local y = state.h/2
     if feedback_item.kind == "seek" then
         local inset = math.min(48,state.w*0.06)
@@ -283,19 +292,18 @@ local function feedback(canvas, state, options)
             (left and "− " or "+ ")..tostring(feedback_item.amount),"ffffff",left and 4 or 6)
     else
         local has_text = feedback_item.text and feedback_item.text ~= ""
-        local volume_feedback = feedback_item.icon and feedback_item.icon:find("volume_",1,true) == 1
-        local scale=feedback_item.scale or 1
-        feedback_canvas:circle(state.w/2,y,39*scale,"000000",0.6)
-        if feedback_item.icon then feedback_canvas:icon(feedback_item.icon,state.w/2,
-            has_text and not volume_feedback and y-7*scale or y,54*scale) end
+        -- Keep the icon centered; all feedback text uses the same separate top card as volume.
+        local scale=(feedback_item.scale or 1)*math.min(1,state.h/300)
+        -- Menus already identify the action; a text card avoids covering their choices.
+        if not controls.menu then
+            feedback_canvas:circle(state.w/2,y,39*scale,"000000",0.6)
+            if feedback_item.icon then feedback_canvas:icon(feedback_item.icon,state.w/2,y,54*scale) end
+        end
         if has_text then
-            local text_y=volume_feedback and state.h*0.1+22.5 or y+24
-            local size=volume_feedback and 19.25 or 13
-            if volume_feedback then
-                local width=model.text_width(feedback_item.text,size)+40
-                feedback_canvas:rect(state.w/2-width/2,text_y-22.5,width,45,"000000",0.6,3)
-            end
-            feedback_canvas:label(volume_feedback and "percentage" or "chapter",state.w/2,text_y,feedback_item.text,"ffffff",5)
+            local height=state.h<300 and 31 or 45
+            local cy=controls.menu and spacing.inset+height/2 or state.h*.1+height/2
+            feedback_canvas:badge(state.h<300 and "body" or "percentage",state.w/2,cy,
+                feedback_item.text,state.w-2*spacing.inset,height)
         end
     end
     canvas.events[#canvas.events+1] = feedback_canvas:finish()
@@ -323,8 +331,7 @@ local function render_tooltip(canvas,state,controls,options)
     end
     if not content or opacity <= 0 then return end
     local layer=canvas:layer(opacity)
-    layer:rect(content.x-content.w/2,content.y-15.5,content.w,31,"000000",0.6,16)
-    layer:label("tooltip",content.x,content.y,content.text,"ffffff",5)
+    layer:badge("tooltip",content.x,content.y,content.text,state.w-2*spacing.inset,31,10,16)
     canvas.events[#canvas.events+1]=layer:finish()
 end
 
@@ -332,7 +339,7 @@ function M.render(state, options, motion)
     local canvas = draw.new(state.opacity,options.font,motion,state)
     local controls = M.layout(state, options)
     if state.opacity > 0 then
-        -- The current YouTube player uses individual capsules, without a bottom scrim.
+        -- Draw shared control capsules without a bottom scrim.
         if controls.title then
             canvas:title_scrim(state.w)
             canvas:label("title",controls.title.x,controls.title.y,model.fit(state.title,controls.title.width,20),"ffffff",4)
@@ -368,11 +375,12 @@ function M.render(state, options, motion)
             canvas:label("timer",controls.time.x+controls.time.w/2,controls.cy,controls.time.text,nil,5)
         end
         if controls.chapter then
-            canvas:hover(controls.chapter.area,state.hover == "chapter" or state.menu == "chapters")
+            canvas:hover(controls.chapter.area,state.hover == "chapter" or state.focus=="chapter" or state.menu == "chapters")
             if controls.chapter.width >= 18 then canvas:label("chapter",controls.chapter.x,controls.cy,model.fit(controls.chapter.title,controls.chapter.width,13)) end
         end
         if controls.volume.w > 1 then
-            local v = clamp(state.mute and 0 or state.volume,0,100)/100
+            local maximum=state.volume_max or options.volume_max or 200
+            local v = clamp(state.mute and 0 or state.volume,0,maximum)/maximum
             -- The 12 px knob travels inside the panel; clip it while that panel expands.
             local panel=canvas:layer(1,controls.volume)
             local knob=6+math.max(0,controls.volume.w-12)*v
@@ -386,7 +394,8 @@ function M.render(state, options, motion)
         render_tooltip(canvas,state,controls,options)
     end
     -- Feedback has its own opacity so key presses remain visible when controls are hidden.
-    feedback(canvas,state,options)
+    -- A centered workspace owns this space; transient playback icons must not cover its rows.
+    if not (controls.menu and controls.menu.wide) then feedback(canvas,state,options,controls) end
     -- Temporary speed sits above the video, independent of control visibility.
     if state.speed_hold then
         local badge=draw.new(1,options.font)

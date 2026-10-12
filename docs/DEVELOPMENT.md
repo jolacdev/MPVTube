@@ -14,8 +14,10 @@ modules. This follows [MPV script packaging](https://mpv.io/manual/stable/#scrip
 | --- | --- |
 | `main.lua` | Options, observers, frame scheduling, visibility and lifecycle |
 | `core/model.lua` | Pure formatting, metadata, track IDs, seek bounds and feedback bursts |
-| `core/player.lua` | Native actions, menus, sleep timer and temporary window settings |
-| `core/input.lua` | Mouse gestures, 2× holds, tooltips and shortcuts |
+| `core/player.lua` | Shared native actions, menus, amplification and temporary window settings |
+| `core/shortcuts.lua` | Shared action registry, ownership, conflict checks and persistent key editor |
+| `core/export.lua` | Codec-aware export planning and one asynchronous stream-copy worker |
+| `core/input.lua` | Mouse gestures, Tab focus, synchronous key routing, 2× holds and tooltips |
 | `core/captions.lua` | Native subtitle choices, observations and Reset |
 | `core/thumbnails.lua` | Providers, worker, cache and bitmap overlay |
 | `ui/view.lua` | Shared draw/hit geometry; controls, timeline and feedback |
@@ -40,20 +42,28 @@ Key invariants:
   keyframe seeks and commit exactly on release.
 - File changes cancel pending taps, presses and 2× holds. Shutdown kills callbacks
   and restores temporary settings, preserving later subtitle-position/end-of-file
-  changes. Menu key capture ends when its menu closes.
+  changes. Focused/menu key capture ends synchronously on dismissal, before the next key event.
+  Tab stores hit IDs/pages, resolves fresh geometry after resize and skips unavailable controls.
+  Esc steps back; Backspace clears menus/focus and resets the Tab starting point.
 - Property changes coalesce into a frame. Hidden playback skips frequent time/
   cache redraws; settled animations stop scheduling frames.
 - Caption choices read back successful writes and observe native outline options.
   Border aliases can miss change notifications. The native names are available
   throughout our supported MPV 0.40+ range.
 - `ui.draw.metrics`, `Canvas:hover`, `Canvas:toggle` and `ui.view.volume_hover`
-  share spacing, highlights and expanded-volume behavior. `ui.motion` owns timing;
+  share spacing, highlights and expanded-volume behavior. `Canvas:badge` shares measured, clipped text backgrounds for tooltips and all
+  central feedback labels; compact feedback scales to leave space around the icon.
+  `ui.motion` owns timing;
   player actions do not create separate animation timers.
 - Plain menu rows share a text inset, including Reset; only icons/checkmarks
-  reserve an extra column.
-- Menu pages slide/resize inside a shared clip, retaining right/bottom anchors.
-  One travel distance separates unequal widths. Pointer capture covers both pages
-  until a deadline, preventing invisible rows or delayed renders blocking input.
+  reserve an extra column. Menu width estimates reuse the rendered inset and
+  value spacing, rounded up to avoid fractional clipping of short labels.
+- Menus paint current geometry immediately, without retaining old pages or blocking
+  clicks. Shortcut tools use a centered wide panel. Subtitle style is a pinned row
+  outside the scroll range. Shortcut notices use the same pinned geometry with a
+  fixed height, semantic colors and no action. Editor information uses plain text
+  roles, separated from actions by a divider. Editor commands reuse ordinary menu
+  typography, hover, click and focus geometry, without a separate button renderer.
 
 ### Typography and assets
 
@@ -63,10 +73,10 @@ Key invariants:
 fonts use native ASS sizing. Explicit weight/italic/tracking avoids inherited OSD
 styles. See [libass font metrics](https://github.com/libass/libass/blob/master/libass/ass_font.c).
 
-Timers use a hidden [compute_bounds overlay](https://mpv.io/manual/stable/#command-interface)
+Timers and feedback cards use a hidden [compute_bounds overlay](https://mpv.io/manual/stable/#command-interface)
 to measure the same font/weight being drawn. Its small cache resets on font/window/
-scale changes; a warm-up frame handles the VO's previous dimensions. Other clipped
-labels use a cheaper width estimate.
+scale changes; a warm-up frame handles the VO's previous dimensions. Menu labels
+use a cheaper width estimate.
 
 Four unmodified [Google Roboto TTFs](https://github.com/googlefonts/roboto-2/tree/38062f4b4a0be4346d07a928408da21602545e9e/src/hinted)
 provide Regular, Medium, Bold and Black. Keep these runtime assets in Git.
@@ -91,12 +101,69 @@ reference frames to reduce startup/seek work. A failed or empty fast decode retr
 once with normal probing/all frames, then falls back to timestamps. No extra
 worker, persistent process or background scan is added.
 
+## Focus, shortcuts and export ownership
+
+`core/shortcuts.lua` defines key/action/label/category tuples once. Mouse descriptors
+and keyboard handlers call `player.action`; tooltip hints derive from effective
+assignments. The default `mpvtube` policy owns an exclusive section. An `UNMAPPED`
+ignore keeps unassigned keys inactive even if every action is disabled. Avoid
+`ANY_UNICODE` here: MPV checks it before assigned letters, regardless of priority.
+`exclusive` remains an alias; `compatible` explicitly permits native/user bindings.
+Focus routes activate above playback bindings and deactivate synchronously;
+registered callbacks forward already queued events after focus clears.
+
+The editor groups owned actions; Input diagnostics exposes live routes through
+MPV’s weak/strong and section-priority rules. MPV's binding property still reports
+priorities for shadowed sections: `shortcuts.effective` filters below the ownership
+section before resolving conflicts, labels or queued focus events. Key capture uses a temporary exclusive
+section with native key names, retaining mouse routes. Candidate and Save both
+check canonical assignments and external active bindings, excluding temporary UI
+routes. Esc cancels, Enter stays reserved for activation. Only valid saved changes
+rebuild the playback section. Successful edits update shared menu/tooltip hints immediately.
+The form initially focuses Record, then reveals/focuses Save after a valid candidate.
+Both reuse the menu's ordinary row-focus path; Enter activates the focused action.
+Toolbar hit flags make Settings, CC and Audio close any open panel before opening
+their own view on a later click. Top MPV Menu reuses normal button drawing and
+hit geometry; Tab visits the playback bar before the top tools, from left to right.
+
+The owned JSON keymap has a version and ID/key dictionary. Saving detects external
+changes, writes a sibling temporary file and renames it into place. Windows uses a
+recoverable rename fallback. Failed writes keep the active mapping. Native input
+files are untouched. Tests use a temporary `keymap_path`, never the user’s keymap.
+Reset all uses the same writer, checks all defaults together before saving and
+applies them only after success. Old swapped assignments do not create false conflicts;
+effective external routes still do. Cancel, write failures and concurrent file edits
+leave active keys intact. Diagnostics shows owners/commands/priorities and explains
+its read-only troubleshooting purpose in a pinned notice.
+Track mappings use native IDs and the common property action.
+
+Discrete changes share player feedback and read accepted native values. Subtitle
+Off and toggle both use `sub-visibility`, retaining `sid`; the bar opens the selector.
+Caption writes aggregate success before reporting a result. The registry, wheel,
+focused volume control and synchronization menu reuse configurable step values.
+
+Exports resolve the selected/all embedded native `ff-index` and an explicit codec/
+container table. Remote paths and unsupported formats are unavailable. Metadata
+only contributes sanitized filename suffixes. FFmpeg receives argument arrays,
+`-map`, `-c copy`, an explicit muxer and `-n`, never shell text or transcoding.
+One asynchronous executable probe enables exports and the FFmpeg preview backend; one export worker runs at a
+time. Batches snapshot their source/track paths and may finish after file changes.
+Generation tokens ignore late shutdown callbacks. No output file is overwritten
+or removed by the worker; failed/interrupted copies can leave incomplete exports,
+which the user must remove before retrying. Existing media is never modified.
+
+Clean subtitle styling snapshots native caption properties, uses
+`sub-ass-override=strip`, and restores the pre-toggle snapshot when switched off.
+Appearance changes retain strip while enabled; Reset restores startup style.
+Amplification sets native `volume-max`, respects subsequent external changes and
+restores its original ceiling only while still owning the value.
+
 ## Script messages
 
 Use `script-message-to mpvtube show`, `hide` or `toggle` for visibility.
 `script-message-to mpvtube menu PAGE` toggles a page. Supported pages:
-`settings`, `speed`, `audio`, `sub`, `video`, `chapters`, `playlist`, `sleep`,
-`info`, `captions`; subtitle choice pages are `caption-font`, `caption-color`,
+`settings`, `speed`, `audio`, `sub`, `video`, `chapters`, `playlist`,
+`info`, `captions`, `controls`, `sync`, `exports`, `shortcuts`, `shortcut-reset`, `bindings`, `mappings`; subtitle choice pages are `caption-font`, `caption-color`,
 `caption-size`, `caption-opacity`, `caption-background`,
 `caption-background-opacity`, `caption-edge`. Unknown pages are ignored.
 Messages work with `keyboard=no`.
@@ -112,7 +179,6 @@ a framework. Failed assertions stop with a nonzero exit code.
 | Syntax | `luac -p path/to/file.lua` | Parse Lua without executing it |
 | Regression | `luajit tests/regression.lua` | Real Lua modules, deterministic layout/motion and mocked native services |
 | Native | `python3 tests/integration.py` | Real Lua skin in isolated MPV, generated local media and screenshots |
-| Online, optional | `python3 tests/online.py` | Real Learn Linux TV URL, chapters, English/Spanish captions and native controls |
 
 Parse every runtime file with:
 
@@ -120,12 +186,14 @@ Parse every runtime file with:
 for file in $(rg --files scripts/mpvtube -g '*.lua'); do luac -p "$file"; done
 ```
 
-Native checks need MPV, FFmpeg, Python 3 and a macOS/Linux desktop. `--no-config`
-keeps them separate from user settings. `tests/player.py` is the shared JSON IPC
+Native checks need MPV, FFmpeg/ffprobe, Python 3 and a macOS/Linux desktop. `--no-config`
+keeps them separate from user settings. Physical window/terminal input is disabled
+for these launches; IPC injects the tested gestures, so normal computer use cannot
+change the fixture. The main launch avoids focus stealing using the supported option name; short
+ownership checks request fresh windows. `tests/player.py` is the shared JSON IPC
 client, not another suite. Windows needs the Lua check and the
 [manual checklist](../README.md#5-open-media-and-check-the-controls); this harness
-uses Unix sockets. Online checks additionally require yt-dlp/network access;
-missing streams or captions fail the run, rather than being counted as success.
+uses Unix sockets. UI checks use generated local media and need no website access.
 
 ### Understanding the Lua tests
 
@@ -141,10 +209,9 @@ also counts successes. The total includes repeated checks across widths/states,
 not that many independent scenarios.
 
 Pure checks use sample state, generated ASS instructions and deterministic clocks.
-They verify formatting, missing metadata, bounds, timers, styling, animations and
+They verify formatting, missing metadata, bounds, focus, styling, animations and
 hit capture. A fake `mp` records native writes/workers and lets tests trigger
-callbacks immediately or defer property notifications, including sleep expiry,
-delayed clicks, aborted prefetch, provider handoff and stale file/track completions.
+callbacks immediately or defer property notifications, including delayed clicks, aborted prefetch, provider handoff and stale file/track completions.
 Installed code uses the real API.
 
 ### Understanding the Python tests
@@ -166,10 +233,16 @@ no test hooks.
 
 Native coverage includes buttons, keyboard/menu navigation, volume/mute feedback,
 held sliders through reversals/overshoot/out-of-bounds movement, left/right safe-area
-clicks/double-clicks, held video clicks, seeks, dynamic hour/remaining timers, window modes, playlists,
-long chapters, audio-only MP3/WAV, external SRT, caption styles/Reset/CC, sleep,
+clicks/double-clicks, held video clicks, seeks, dynamic hour/remaining timers, mini player/fullscreen, playlists,
+long chapters, audio-only MP3/WAV, external SRT, caption styles/Reset/CC/clean override, amplification, synchronization, exports,
+Tab focus/clear/step-back, shortcut editing/conflicts/persistence, no fallback for
+remapped/disabled keys, fixed editor notices, categorized controls and all ownership
+policies, disabled FFmpeg actions, native MPV tools,
 auto-hide and lifecycle cleanup. Preview checks measure cold/cached/hidden-control
-uploads and verify the selected video track. The log confirms all four Roboto faces.
+uploads and verify the selected video track. The log confirms all four Roboto faces. Export checks read SRT output and probe
+AAC containers for native codecs, and verify ASS exports retain authored fonts; collisions must preserve original output bytes.
+A small 1 fps fixture validates the configurable 3/10/60/300-second seek modifiers;
+the sparse ten-hour fixture only tests timestamp layout because its frame gaps are ten minutes.
 Lua checks keep hover labels anchored across missing, loaded and tall previews,
 with chapters and at both edges of narrow and wide players.
 
@@ -187,7 +260,8 @@ is FFmpeg `testsrc2`, made by `integration.py`: 24 seconds, 1280 × 720, two ton
 tracks labeled English/Spanish, an English SRT and three chapters. Motion makes
 pause, frame stepping, seeks and preview differences visible; it is not a movie.
 
-The generator also creates MP3/WAV without video/subtitles and a second-video
+The generator also creates styled ASS for authored/clean caption comparisons and
+a small seek fixture with whole-second frames, MP3/WAV without video/subtitles and a second-video
 variant with a blue stream to expose wrong-track previews. The full run adds
 external Spanish SRT, 48 short chapters and a sparse 10:10:00 video containing
 61 frames, one per ten minutes, for hour-field tests without large media.
@@ -201,55 +275,34 @@ mpv --no-config --osd-fonts-dir=./fonts --script=./scripts/mpvtube --force-windo
 The first command needs only Python/FFmpeg; the others open generated media with
 the repository's skin. No user configuration is changed.
 
-## YouTube comparison and motion reference
+## Visual geometry and motion
 
-The 11 October 2026 embedded-browser audit used Learn Linux TV's
-[Ansible tutorial](https://www.youtube.com/watch?v=CMB5GCexb84) in regular,
-fullscreen and compact players. It covered icons, active/disabled states, captions,
-chapter selection, speed, time, volume, key feedback and settings. A prior long-time
-comparison used [this ten-hour rain video](https://www.youtube.com/watch?v=zSKfyjcR4x4).
-YouTube experiments can change the reference. The current MPV online attempt was
-blocked by HTTP 403; browser comparison and local integration still completed.
+The current skin and generated local fixtures are the UI baseline. Live website
+or reference-video audits are not required. Keep the existing rounded dark cards,
+Roboto roles, vector icons and shared geometry coherent when adding controls.
 
-| Geometry / typography | Observed target |
+| Element | Shared geometry |
 | --- | --- |
-| Capsules / hovers | 40 px high; 12 px side / 8 px bottom margin; black 30%; white hover 10%, 32 px high |
-| Icons | Bottom SVG canvas 24 px, chapter chevron 20 px, information canvas 36 px |
-| Volume | 52 px panel, 2 px rail, 12 px knob, then 3 px gap / 16 px padding; one/two waves at 50% |
-| Time | Dynamic width; 16 px padding; 14 px Medium |
-| Timeline | Center 59 px from bottom; 3 px resting / 6 px expanded; chapter gaps |
-| Menus | Right 12 px, bottom 62 px; row 48 px, padding 8 px, submenu header 57 px; black 60% |
-| Text | Roboto fallback/title; named CSS roles and 400/500/700/900 weights in `text_styles` |
-| Feedback | 78 px circle / 54 px icon; separate top percentage; 24 px Bold signed seeks |
-| Autoplay / gear | 30 × 18 px track, 14 px knob; gear turns 30° |
+| Bar capsules / hovers | 40 px high; 12 px side / 8 px bottom inset; black 30%; white hover 10% |
+| Icons | Standard 24 px; track arrows 16 px in 24 px slots |
+| Time | Measured dynamic width; equal 16 px padding; 14 px Medium |
+| Menus | Black 60%, radius 12 px; ordinary right 12 / bottom 62 px; shortcut workspace centered |
+| Rows | Ordinary 48 px, shortcut 40 px, compact 30 px; padding 8 px; pinned subtitle-style footer |
+| Feedback | Centered circle/icon, bounded separate top text card; compact sizing |
 
-| Motion | Timing / shared curve |
-| --- | --- |
-| Hover, timeline, tooltip, knob | 0.2 s; cubic-bezier(0.05,0,0,1) |
-| Volume panel | 0.2 s; enter (0,0,0.2,1), leave (0.4,0,1,1) |
-| Waves / autoplay track | About 0.25 s around pivots (18,12)/(22,12); track 0.08 s leave curve |
-| Gear / compact arrow | 0.1 s leave curve / 0.3 s modern curve |
-| Feedback | 1 s; fade/grow first 25%, hold to 75%, shrink/fade; modern curve |
-| Menu fade / page travel | 0.1 s enter/leave / 0.25 s (0.4,0,0.2,1), pointer guard |
-| Control visibility | Default 0.25 s enter / 0.1 s leave; configurable |
-| Arrow seek | About 1.2 s; fade, outward chevron, hold, fade; shared easing approximation |
+`ui.motion` owns hover, tooltip, switch, wave and feedback transitions. Menu
+opening/closing, navigation and scrolling have no animation delay or pointer guard.
+Retarget from current values and prune settled tracks. Visibility still uses
+`fade_duration`; menu painting has full opacity independently of the bar fade.
 
-`ui.motion.duration` and its curves own these values; `ui.draw` owns painting.
-Retargeting samples the current value and prunes unused tracks. Modern play/pause
-and CC glyphs switch directly; surrounding feedback/highlights animate.
-The browser's held-click helper returns after release, so the live 2× badge was
-not captured during a hold; native press/release/restoration is tested.
-
-Native limits remain explicit: chapters use a popup, bitmap preview corners stay
-square, caption styling uses MPV's single backing layer, and video tracks replace
-a streaming-quality selector. Browser blur, window-manager motion and rasterization
-can differ. Matching outlines/spacing is not proof of identical screenshot pixels.
+Native limits: preview corners stay square, subtitle backing styles use MPV’s
+single layer, bitmap captions cannot be restyled, and placement depends on the
+window manager. Geometry checks need native screenshot review.
 
 ## References and licensing
 
 Technical references: [MPV API](https://mpv.io/manual/stable/#lua-scripting),
 [ModernZ](https://github.com/Samillion/ModernZ),
 [mpv-osc-youtube-ui](https://github.com/eatsu/mpv-osc-youtube-ui).
-No code/assets were copied from those reference projects. Player outlines were
-transcribed from the live YouTube player; screenshots remain their owners' property.
+No code/assets were copied from those reference projects.
 Source uses MIT; bundled Roboto uses Apache 2.0.

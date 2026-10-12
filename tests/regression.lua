@@ -92,8 +92,8 @@ cache_state.cache={};cache_rectangles={}
 ui.render_timeline(canvas,cache_state,{seek_lo=0,seek_hi=20},{accent="ff0033"})
 check(#cache_rectangles==1,"read-ahead duration remains a fallback when ranges are unavailable")
 
-local o={title=true,theater=true,pip=true,menu_width=380,menu_opacity=.6,
-    accent="ff0033",font="Arial",tooltip_delay=.45}
+local o={title=true,pip=true,menu_width=380,menu_opacity=.6,
+    accent="ff0033",font="Arial",tooltip_delay=.45,ffmpeg_path="ffmpeg",volume_max=200}
 local s={w=1440,h=900,opacity=1,time=405,duration=1581,seekable=true,pause=true,
     mute=false,volume=75,speed=1,volume_expand=0,timeline_expand=0,fullscreen=true,
     title="Ansible for Complete Beginners: Your First Playbook",sub_visibility=true,sid=3,aid=2,vid=1,
@@ -169,7 +169,7 @@ drawing.new=function(...)
 end
 s.fullscreen,s.volume_expand=false,1
 s.playlist,s.playlist_pos={{filename="one"},{filename="two"},{filename="three"}},1
-local hover_widths={play=32,previous=32,next=32,mute=103,autoplay=48,cc=48,settings=48,pip=48,theater=48,fullscreen=48}
+local hover_widths={play=32,previous=32,next=32,mute=103,autoplay=48,cc=48,settings=48,pip=48,fullscreen=48}
 for _,button in ipairs(ui.layout(s,o).buttons) do
     if hover_widths[button.id] then
         s.hover,s.mx,s.my=button.id,button.x+button.w/2,button.y+20
@@ -189,7 +189,7 @@ s.playlist,s.playlist_pos={{filename="one.mkv"}},0
 s.mx,s.my,s.mouse_inside=400,841,true
 for _,page in ipairs({"settings","speed","audio","sub","chapters","playlist","info","captions",
     "caption-font","caption-size","caption-color","caption-opacity","caption-background",
-    "caption-background-opacity","caption-edge","sleep"}) do
+    "caption-background-opacity","caption-edge","controls","sync","exports","shortcuts","binding","mappings"}) do
     s.menu=page
     local data,l=ui.render(s,o)
     check(#data>0 and l.menu and #l.menu.rows>0,"render menu: "..page)
@@ -301,7 +301,7 @@ for _,position in ipairs({0,1,2}) do
                 end
             end
             for _,hit in ipairs(l.hits) do
-                if hit.id~="timeline" then check(hit.action~=nil,"control must have an action: "..hit.id) end
+                if hit.id~="timeline" then check(hit.action~=nil or hit.enabled==false,"available control must have an action: "..hit.id) end
             end
         end
     end
@@ -335,6 +335,39 @@ for _,icon in ipairs({"volume_down","volume_up","volume_off"}) do
     check(data:find("\\pos(720.00,112.50)",1,true)~=nil,"volume percentage at the top")
 end
 s.feedback,s.opacity=nil,1
+
+-- Every central label gets its own background, with bounded text and space above the circle.
+for _,size in ipairs({{300,180},{425,240},{960,600},{1440,900}}) do
+    s.w,s.h,s.opacity=size[1],size[2],0
+    for _,text in ipairs({"Synchronization reset","Export file already exists",string.rep("Long chapter / track name ",12)}) do
+        s.feedback={icon="info",text=text,opacity=1,scale=1.33}
+        local shapes,labels={},{}
+        drawing.new=function(...)
+            local canvas=original_canvas(...)
+            local rect,label=canvas.rect,canvas.label
+            function canvas:rect(x,y,w,h,...)
+                shapes[#shapes+1]={x=x,y=y,w=w,h=h};return rect(self,x,y,w,h,...)
+            end
+            function canvas:label(role,x,y,text,...)
+                labels[#labels+1]={role=role,x=x,y=y,text=text};return label(self,role,x,y,text,...)
+            end
+            return canvas
+        end
+        ui.render(s,o)
+        local circle,card=shapes[1],shapes[2]
+        check(#shapes==2 and #labels==1,"central feedback has one circle, one card and one label")
+        check(card.x>=12 and card.x+card.w<=s.w-12 and card.y>=0,"feedback card fits narrow and wide players")
+        check(card.y+card.h<circle.y,"feedback text background never overlaps the icon circle")
+        local font_size=drawing.text_styles[labels[1].role][1]
+        check(model.text_width(labels[1].text,font_size)<=card.w-40,"feedback label retains equal inner padding")
+    end
+end
+drawing.new=original_canvas
+s.w,s.h,s.feedback,s.opacity=1440,900,nil,1
+
+s.menu,s.feedback="shortcuts",{icon="info",text="Transient notification",opacity=1,scale=1}
+check(not ui.render(s,o):find("Transient notification",1,true),"central feedback never covers the shortcut workspace")
+s.menu,s.feedback=nil,nil
 
 -- Seek bursts must match YouTube's signed amount and have no circular background.
 local burst=model.seek_feedback(nil,5,1)
@@ -456,29 +489,13 @@ local opening_gear=frame(1.15)
 local open_gear,opened=frame(1.3)
 check(opening_gear~=open_gear and open_gear:find("\\frz-30.00",1,true),"gear rotates through intermediate frames")
 animated_state.menu="speed"
-frame(1.4)
-local moving_panel,transition=frame(1.5)
-local function text_x(data,label)
-    for line in data:gmatch("[^\n]+") do
-        if line:sub(-#label)==label then return tonumber(line:match("\\pos%(([%d.%-]+),")) end
-    end
-end
-local old_right=text_x(moving_panel,"Audio track")-64+animator.old_menu.menu.w
-local new_left=text_x(moving_panel,string.format("%.2fx",animated_state.speed))-transition.menu.w/2
-check(math.abs(old_right-new_left)<.05,"different-width menu pages meet without overlapping their contents")
-check(transition.menu_transition~=nil,"page slide temporarily captures menu clicks")
-local panel=transition.menu_transition
-check(math.abs(panel.x+panel.w-animated_state.w+12)<.001 and math.abs(panel.y+panel.h-animated_state.h+62)<.001,"animated menus retain their right/bottom margins")
-check(ui.hit(transition,panel.x+panel.w/2,panel.y+panel.h/2).id=="menu","sliding rows cannot trigger an unintended action")
-check(ui.hit(transition,transition.speed.x+10,transition.speed.y+12,panel.deadline).id=="speed-slider","expired page guard restores input even before a delayed render")
-check(moving_panel:find("\\clip(",1,true),"menu slide clips both pages to its animated bounds")
-local _,settled=frame(1.7)
-check(not settled.menu_transition and ui.hit(settled,settled.speed.x+10,settled.speed.y+12).id=="speed-slider","settled page restores normal slider hits")
+local immediate,opened_speed=frame(1.4)
+check(not immediate:find("Audio track",1,true),"page changes discard the previous menu immediately")
+check(ui.hit(opened_speed,opened_speed.speed.x+10,opened_speed.speed.y+12).id=="speed-slider","new sliders accept clicks on the opening frame")
+check(not animator.tracks["menu-opacity"],"menus have no opacity animation or input guard")
 animated_state.menu=nil
-frame(1.8)
-check(animator.menu_controls~=nil,"closing menu is retained during its fade")
-frame(2)
-check(animator.menu_controls==nil,"closed menu releases cached content")
+local closed=frame(1.5)
+check(not closed:find("Playback speed",1,true),"closing removes menu content immediately")
 animated_state.hover,animated_state.hover_age="play",1
 frame(2.1);frame(2.4)
 check(animator.tooltip~=nil,"stable hover retains the visible tooltip")
@@ -487,18 +504,11 @@ frame(2.5)
 check(animator.tooltip~=nil,"departing tooltip remains during its fade")
 frame(2.8)
 check(animator.tooltip==nil and not animator.active,"tooltip fade clears cached content and stops animating")
-animated_state.menu="speed"
-frame(3);frame(3.2)
 animated_state.menu="settings"
-local _,growing=frame(3.3)
-local pending_y=growing.menu.y+1
-check(pending_y<growing.menu_transition.y,"growing panel has rows outside its first visible frame")
-check(ui.hit(growing,growing.menu.x+20,pending_y,3.3).id=="menu","hidden destination rows stay passive during a page slide")
-check(ui.active_transition(growing,3.6)==nil,"native capture stops using a stale panel after its deadline")
-local returning=frame(3.4)
-local old_left=text_x(returning,string.format("%.2fx",animated_state.speed))-animator.old_menu.menu.w/2
-local new_right=text_x(returning,"Audio track")-64+growing.menu.w
-check(math.abs(old_left-new_right)<.05,"back navigation also keeps unequal-width page contents separated")
+local direct,settings_layout=frame(3)
+check(direct:find("Audio track",1,true),"return navigation paints its destination immediately")
+check(settings_layout.menu.y+settings_layout.menu.h==animated_state.h-62,"immediate panels retain their bottom margin")
+animated_state.menu=nil
 
 -- Thumbnail lifecycle: one worker, cache reuse/eviction, stale-job cleanup and fallback.
 local jobs, files, removed, messages = {}, {}, {}, {}
@@ -528,6 +538,9 @@ local p=require("core.thumbnails").new(opts,function() end)
 files["/video.mkv"]={is_file=true}
 p:reset("/video.mkv",100)
 check(p:provider()=="ffmpeg","local previews without thumbfast")
+opts.ffmpeg_available=false
+check(p:provider()==nil and p:request(10)==nil and #jobs==0,"missing FFmpeg disables previews without starting a failed worker")
+opts.ffmpeg_available=true
 p:request(10); p.timer.fn()
 p:request(30); p.timer.fn()
 check(#jobs==1,"only one background worker")
@@ -720,29 +733,8 @@ for _,page in ipairs({"captions","caption-color","caption-background-opacity","c
     check(small.menu.y>=0 and small.menu.x>=0,"caption menu fits a small window: "..page)
 end
 
--- Sleep timers cancel old deadlines and pause at expiry without closing the player.
-local sleep=require("core.player")
-local timers={}
-function fake_mp.add_timeout(duration,callback)
-    local timer={duration=duration,callback=callback,killed=false}
-    function timer:kill() self.killed=true end
-    timers[#timers+1]=timer
-    return timer
-end
 function fake_mp.set_property_bool(name,value) caption_properties[name]=value end
-local ss={}
-local sleep_service=sleep.new_sleep_timer(ss,{show=function() end,feedback=function() end})
-sleep_service.set(10)
-check(timers[1].duration==600 and ss.sleep_minutes==10,"ten minute timer uses wall-clock seconds")
-sleep_service.set(15)
-check(timers[1].killed and timers[2].duration==900,"changing the timer cancels the old deadline")
-timers[2].callback()
-check(caption_properties.pause==true and not ss.sleep_minutes,"timer expiry pauses and clears the selection")
-sleep_service.set(20); sleep_service.set(0)
-check(timers[3].killed and not ss.sleep_minutes,"Off cancels a running timer")
-sleep_service.set(30); sleep_service.shutdown()
-check(timers[4].killed,"shutdown cancels the sleep timer")
-
+local player_module=require("core.player")
 -- Exercise the actual action dispatcher, with native writes replaced by recorded values.
 function fake_mp.get_property_number(name,fallback) return caption_properties[name] or fallback end
 function fake_mp.set_property_number(name,value) caption_properties[name]=value end
@@ -752,9 +744,9 @@ function fake_mp.get_property_bool(name,fallback)
     return value
 end
 local playback={volume=75,mute=false,time_remaining=false}
-local feedback_icon
-local controller=sleep.new(playback,o,{show=function() end,request_render=function() end,
-    feedback=function(_,icon) feedback_icon=icon end},{hide=function() end})
+local feedback_icon,feedback_text
+local controller=player_module.new(playback,o,{show=function() end,request_render=function() end,
+    feedback=function(text,icon) feedback_text,feedback_icon=text,icon end},{hide=function() end})
 controller.action({kind="time"})
 check(playback.time_remaining,"time action selects remaining mode")
 controller.action({kind="time"})
@@ -765,12 +757,25 @@ check(caption_properties.fullscreen==true,"fullscreen entry reads native state w
 playback.fullscreen=false
 controller.action({kind="fullscreen"})
 check(caption_properties.fullscreen==false,"fullscreen exit reads native state when an observer lags")
+feedback_icon=nil
 controller.volume(70)
 check(feedback_icon==nil and caption_properties.volume==70,"mouse volume updates sound without central feedback")
+controller.speed(1.05)
+check(feedback_text=="1.05×","speed feedback preserves fine slider increments")
+controller.speed(1.25)
+check(feedback_text=="1.25×","speed feedback preserves preset precision")
+controller.action({kind="frame",value=1})
+check(feedback_text=="No video frames","frame actions explain unavailable audio-only frames")
+caption_properties["load-console"]=false
+controller.action({command="script-binding console/enable"})
+check(feedback_text=="MPV console is disabled","disabled native tools report their dependency instead of executing a fake action")
+caption_properties["load-console"]=nil
+feedback_icon=nil
 controller.action({kind="mute"})
 check(feedback_icon==nil and caption_properties.mute,"mouse mute has no central feedback")
 controller.action({kind="mute",show_feedback=true})
-check(feedback_icon=="volume_off","keyboard mute shows the crossed speaker")
+check(feedback_icon=="volume_up","keyboard mute reads native state before restoring the speaker")
+caption_properties.volume=75
 controller.volume(70,true)
 check(feedback_icon=="volume_down","decreasing volume uses the reference decrease icon")
 controller.volume(80,true)
@@ -804,12 +809,14 @@ function fake_mp.add_timeout(duration,callback,disabled)
     return timer
 end
 function fake_mp.get_time() return 1 end
+function fake_mp.get_script_name() return "mpvtube" end
 function fake_mp.get_mouse_pos() return pointer_x,pointer_y end
 function fake_mp.set_mouse_area() end
 function fake_mp.enable_key_bindings() end
 function fake_mp.set_key_bindings(keys)
     for _,key in ipairs(keys) do bindings[key[1]]=key[2] end
 end
+function fake_mp.remove_key_binding(name) bindings[name]=nil end
 function fake_mp.add_forced_key_binding(_,name,callback) bindings[name]=callback end
 function fake_mp.add_key_binding(_,name,callback) bindings[name]=callback end
 function fake_mp.register_event(name,callback) events[name]=callback end
@@ -821,7 +828,8 @@ local actions,menus_closed={},0
 local input_player={action=function(descriptor) if descriptor and next(descriptor) then actions[#actions+1]=descriptor end end,
     pause=function() pauses=pauses+1 end,seek=noop,volume=noop,relative_seek=noop,subtitles=noop,
     close_menu=function() input_state.menu=nil;menus_closed=menus_closed+1 end}
-local input_options={tooltip_delay=.45,video_click=true,keyboard=false,menu_width=380}
+local input_options={tooltip_delay=.45,video_click=true,keyboard=false,menu_width=380,keymap_path=os.tmpname(),shortcut_policy="mpvtube"}
+os.remove(input_options.keymap_path)
 local input=require("core.input").new(input_state,input_options,input_view,input_player,{hide=noop})
 local function mouse(event,x,y)
     pointer_x,pointer_y=x or 480,y or 250
@@ -861,10 +869,7 @@ mouse("press",panel.x+2,panel.y+2)
 check(input_state.menu=="settings","inside panel padding keeps settings open")
 mouse("press",panel.x+panel.w/2,panel.y+panel.padding+panel.row_h/2)
 check(input_state.menu=="settings" and actions[#actions].page=="speed","inside rows retain their menu action")
-input_state.menu_transition={x=panel.x-100,y=panel.y,w=panel.w+100,h=panel.h,deadline=2}
-mouse("press",panel.x-50,panel.y+20)
-check(input_state.menu=="settings","a sliding panel's captured area does not count as an outside click")
-input_state.menu_transition=nil
+
 -- Scoped right clicks dismiss without activating buttons or invoking native pause.
 for _,page in ipairs({"settings","speed"}) do
     for _,point in ipairs({{6,573},{954,540},{480,596},{32,573},{480,50},{6,250}}) do
@@ -896,7 +901,360 @@ for _,id in ipairs({"settings","play","time","mute"}) do
         end
     end
 end
+for _,page in ipairs({"settings","audio","sub","captions","caption-font","speed","shortcuts"}) do
+    for _,id in ipairs({"settings","cc","audio"}) do
+        input_state.menu=page
+        local layout=ui.layout(input_state,input_options)
+        for _,hit in ipairs(layout.hits) do
+            if hit.id==id then
+                local before=#actions
+                mouse("press",hit.x+hit.w/2,hit.y+hit.h/2)
+                check(not input_state.menu and #actions==before,"any settings view closes when clicking "..id..": "..page)
+            end
+        end
+    end
+end
 mouse("press");input.shutdown();fire_pending()
 check(pauses==1,"shutdown cancels pending input callbacks")
+-- Short control labels must fit alongside their shortcut column, using the painted insets.
+s.w,s.h,s.menu,s.menu_scroll=960,600,"controls",99
+local full_labels={}
+local label_canvas=drawing.new(1,"Roboto")
+function label_canvas:label(role,_,_,text) if role=="body" then full_labels[text]=true end end
+require("ui.menu").render(label_canvas,s,ui.layout(s,o),o)
+check(full_labels["MPV properties"],"native properties label fits beside its shortcut without unnecessary truncation")
+
+-- Configurable seek tiers and live bindings use one registry without overlapping assignments.
+local shortcuts=require("core.shortcuts")
+local assigned={}
+for _,binding in ipairs(shortcuts.defaults({seek_precise=1,seek_short=2,seek_medium=20,seek_long=120})) do
+    check(not assigned[binding.key],"shortcut has one assignment: "..binding.key)
+    assigned[binding.key]=binding.action
+end
+local custom_steps={}
+for _,binding in ipairs(shortcuts.defaults({volume_step=2,sync_step=.025})) do custom_steps[binding.key]=binding end
+check(custom_steps.UP.action.value==2 and custom_steps.DOWN.action.value==-2,"volume keys share the configured percentage step")
+check(custom_steps.g.action.value==-.025 and custom_steps.k.action.value==.025,"sync keys share the configured seconds step")
+check(shortcuts.category(custom_steps["Alt+c"].action)=="Subtitles" and custom_steps["Alt+c"].action.page=="sub","subtitle selector has its own categorized shortcut")
+check(assigned.RIGHT.value==2 and assigned["Shift+RIGHT"].value==1 and assigned["Ctrl+LEFT"].value==-20 and assigned["Ctrl+Alt+LEFT"].value==-120,"all seek tiers respect configured seconds")
+check(assigned.j.kind=="delay" and assigned.k.kind=="delay" and assigned.g.track=="sub","VLC synchronization keys replace conflicting playback keys")
+local live=shortcuts.active({{key="a",cmd="weak",priority=10,is_weak=true},{key="a",cmd="user",priority=1,is_weak=false},
+    {key="a",cmd="focused",priority=2,is_weak=false},{key="b",cmd="disabled",priority=-1},{key="c",cmd="ignore",priority=1}})
+check(#live==1 and live[1].cmd=="focused","guide reports the effective strong binding, excluding disabled/ignored keys")
+local blocked={{section="default",key="d",cmd="native",priority=0,is_weak=true},
+    {section="default",key="x",cmd="user",priority=0,is_weak=false},
+    {section="mpvtube-shortcuts",key="x",cmd="skin",priority=4,is_weak=false},
+    {section="mpvtube-shortcuts",key="UNMAPPED",cmd="ignore",priority=4,is_weak=false},
+    {section="console",key="ESC",cmd="close",priority=5,is_weak=false}}
+local owned={shortcut_exclusive=true,shortcuts={}}
+local effective=shortcuts.effective(owned,blocked)
+check(#effective==2 and effective[1].key=="ESC" and effective[2].cmd=="skin","exclusive guide hides shadowed native/user bindings but retains later native panels")
+check(not shortcuts.conflict(owned,"new","d",blocked),"suspended native bindings cannot cause false shortcut conflicts")
+check(shortcuts.conflict(owned,"new","x",blocked),"effective owned assignments still block conflicts")
+-- Canonical conflicts and tooltip labels share the same registry, without accepting duplicates.
+check(shortcuts.normalize("Shift+c")==shortcuts.normalize("C"),"Shift+letter aliases normalize to the same key")
+check(shortcuts.normalize("Alt+Ctrl+RIGHT")=="Ctrl+Alt+RIGHT","modifier order is canonical")
+local key_state={shortcuts={{id="one",key="x",label="One",action={kind="pause"},command="own/one"},
+    {id="two",key="C",label="Two",action={kind="subtitles"},command="own/two"}}}
+check(shortcuts.conflict(key_state,"one","Shift+c",{}):find("Two",1,true),"duplicate detection catches equivalent Shift notation")
+check(shortcuts.conflict(key_state,"one","d",{{key="d",cmd="cycle deinterlace",priority=0,is_weak=true}}):find("deinterlace",1,true),"active native assignments block edits")
+check(not shortcuts.conflict(key_state,"one","d",{{key="d",cmd="cycle deinterlace",priority=-1,is_weak=true}}),"exclusive-mode suspended assignments do not occupy keys")
+check(shortcuts.conflict(key_state,"one","ENTER",{}),"activation key is reserved")
+check(not shortcuts.conflict(key_state,"one","none",{}),"owned assignments can be disabled")
+shortcuts.refresh(key_state,{{key="x",cmd="own/one",priority=0,is_weak=false}})
+check(shortcuts.tip(key_state,{kind="pause"},"Play")=="Play (x)","tooltips show actual active keys")
+check(shortcuts.tip(key_state,{kind="subtitles"},"CC")=="CC","overridden keys are not advertised as available")
+check(shortcuts.hint(key_state,{kind="pause"})=="x","menu hints reuse live tooltip assignments")
+local reset_state={shortcut_exclusive=true,shortcuts={
+    {id="one",key="b",default="a",label="One"},{id="two",key="a",default="b",label="Two"}}}
+local reset_routes={{section="mpvtube-shortcuts",key="UNMAPPED",cmd="ignore",priority=4,is_weak=false},
+    {section="mpvtube-shortcuts",key="a",cmd="old-two",priority=4,is_weak=false},
+    {section="default",key="a",cmd="native",priority=0,is_weak=false}}
+check(not shortcuts.conflict(reset_state,"one","a",reset_routes,true),"reset validates defaults together and ignores old swapped keys and shadowed native routes")
+reset_routes[#reset_routes+1]={section="another-script",key="a",cmd="external",priority=5,is_weak=false}
+check(shortcuts.conflict(reset_state,"one","a",reset_routes,true):find("external",1,true),"reset still detects an effective external conflict before changing any assignment")
+local hints_state=setmetatable({shortcut_hints={["audio::"]="F12",["sub::"]="Alt+c",["shortcuts::"]="F1"}},{__index=s})
+for _,row in ipairs(ui.menu_rows(hints_state,"settings",o)) do
+    if row.label=="Audio track" then check(row.shortcut=="F12","settings show remapped selector keys") end
+    if row.label=="Subtitles/CC" then check(row.shortcut=="Alt+c","settings distinguish opening captions from toggling them") end
+end
+for _,width in ipairs({300,600,1440}) do
+    local top_state=setmetatable({w=width,h=900,menu=false},{__index=s})
+    local layout=ui.layout(top_state,o)
+    for _,button in ipairs(layout.buttons) do
+        if button.id=="native-menu" then
+            check(button.top and button.y==10 and button.y+button.h<layout.safe_area.y,"MPV menu stays in the top tools across window sizes")
+            if layout.info then check(button.x+button.w<layout.info_area.x,"native menu and information hit areas do not overlap") end
+        end
+    end
+end
+local diagnostic_rows=ui.menu_rows({active_bindings={{key="a",cmd="external",owner="other-script",priority=5}}},"bindings",o)
+check(diagnostic_rows[1].action.binding.owner=="other-script" and diagnostic_rows[#diagnostic_rows].kind=="notice" and diagnostic_rows[#diagnostic_rows].label:find("Read-only",1,true),"input diagnostics expose the actual owner and explain their troubleshooting purpose")
+local reset_rows=ui.menu_rows(s,"shortcut-reset",o)
+check(reset_rows[1].action.shortcut=="reset-all" and reset_rows[2].action.page=="shortcuts" and reset_rows[2].shortcut=="Esc" and reset_rows[#reset_rows].pinned,"reset confirmation shares ordinary actions, navigation hints and a passive explanation")
+local old_tracks,old_menu,old_size=s.tracks,s.menu,{s.w,s.h}
+s.w,s.h,s.menu=960,600,"sub"
+s.tracks={}
+for id=1,30 do s.tracks[#s.tracks+1]={type="sub",id=id,lang="en"} end
+local footer_y
+for _,offset in ipairs({0,15,99}) do
+    s.menu_scroll=offset
+    local panel=ui.layout(s,o)
+    local footer=panel.hits[#panel.hits]
+    check(footer.pinned and footer.row.label=="Clean subtitle style","clean styling remains outside the scrolling track list")
+    check(not footer_y or footer_y==footer.y,"pinned subtitle footer does not move while scrolling")
+    footer_y=footer.y
+end
+s.tracks,s.menu,s.w,s.h,s.menu_scroll=old_tracks,old_menu,old_size[1],old_size[2],0
+local controls_rows=ui.menu_rows(s,"controls",o)
+local categories={}
+for _,row in ipairs(controls_rows) do
+    if row.kind=="section" then categories[row.label]=true end
+    if row.label=="Export tracks" then check(not row.action and row.disabled,"missing FFmpeg disables the export entry") end
+end
+check(categories.Subtitles and categories.Audio and categories.Playback and categories.Synchronization,"more controls separates related actions by category")
+local chapter_time=s.time
+for _,time in ipairs({0,s.duration}) do
+    s.time=time
+    for _,row in ipairs(ui.menu_rows(s,"controls",o)) do
+        if row.label==(time==0 and "Previous chapter" or "Next chapter") then
+            check(row.disabled and not row.action,"chapter menu boundaries match the bar's disabled buttons")
+        end
+        if row.label=="Previous subtitle track" or row.label=="Next audio track" then
+            check(row.disabled and not row.action,"single-track navigation is unavailable in both menu and bar")
+        end
+    end
+end
+s.time=chapter_time
+local settings_rows=ui.menu_rows(s,"settings",o)
+check(settings_rows[4].label=="Export tracks" and settings_rows[4].disabled,"export has a prominent disabled entry in Settings without FFmpeg")
+for _,button in ipairs(ui.layout(s,o).buttons) do
+    if button.id=="cc" then check(button.action.page=="sub","CC opens the subtitle selector like the audio button") end
+end
+-- Shortcut information stays passive; actions reuse ordinary menu rows and notices stay fixed.
+local editor={w=1440,h=900,menu="binding",menu_scroll=0,key_edit="one",
+    shortcuts={{id="one",key="SPACE",default="SPACE",label="Play / pause"}}}
+for _,size in ipairs({{1440,900},{600,360},{300,180}}) do
+    editor.w,editor.h=size[1],size[2]
+    local before
+    for _,tone in ipairs({"info","error","success"}) do
+        editor.keymap_tone=tone
+        editor.keymap_message=tone=="error" and "Already used: Fullscreen" or tone=="success" and "Saved" or "Ready to save"
+        local panel=require("ui.menu").geometry(editor,o)
+        local notice=panel.rows[#panel.rows]
+        check(notice.kind=="notice" and notice.pinned and not notice.action,"shortcut status is separate from selectable options")
+        check(panel.y>=0 and panel.y+panel.h<=editor.h,"shortcut editor stays within small and large windows")
+        check(not before or before==panel.y,"changing status does not move the shortcut controls")
+        before=panel.y
+        check(panel.rows[2].kind=="summary" and panel.rows[2].current=="Space" and panel.rows[3].divider and panel.rows[3].action.shortcut=="capture","current/proposed keys share one information block, separated from commands")
+    end
+end
+editor.w,editor.h,editor.key_candidate,editor.keymap_tone=1440,900,"F12","error"
+local editor_canvas=drawing.new(1,"Roboto")
+local insets,status_color,editor_shapes={},nil,{}
+local editor_rect=editor_canvas.rect
+function editor_canvas:rect(x,y,w,h,...)
+    editor_shapes[#editor_shapes+1]={x=x,y=y,w=w,h=h}
+    return editor_rect(self,x,y,w,h,...)
+end
+function editor_canvas:label(role,x,_,text,color)
+    if role=="field_label" or role=="body" then insets[text]=x end
+    if role=="tooltip" and text:find("Error: ",1,true) then status_color=color end
+end
+local editor_layout=ui.layout(setmetatable(editor,{__index=s}),o)
+editor.hover,editor_canvas.state="row-2",editor
+require("ui.menu").render(editor_canvas,editor,editor_layout,o)
+check(insets["Current key"]==editor_layout.menu.x+32,"shortcut information keeps its paired inset")
+check(insets["Record new shortcut"]==editor_layout.menu.x+16 and insets["Save changes"]==insets["Record new shortcut"],"editor actions reuse the ordinary menu text inset")
+check(insets["New key"]==editor_layout.menu.x+32+(editor_layout.menu.w-64)/2,"wide editors group current/new information in two columns")
+for _,hit in ipairs(editor_layout.hits) do
+    if hit.row and hit.row.kind=="summary" then
+        check(not hit.action,"shortcut information cannot be clicked or focused")
+        for _,shape in ipairs(editor_shapes) do
+            check(not (shape.y>=hit.y and shape.y+shape.h<=hit.y+hit.h),"shortcut information has no button-like box or hover fill")
+        end
+    elseif hit.row and hit.row.action and hit.row.action.shortcut then
+        check(hit.x==editor_layout.menu.x+editor_layout.menu.padding and hit.w==editor_layout.menu.w-2*editor_layout.menu.padding and hit.h==editor_layout.menu.row_h and hit.hover_radius==0,"shortcut actions reuse full-width menu hit and hover geometry")
+    end
+end
+check(status_color=="ff8a80","error guidance has a distinct semantic color")
+local long_command=string.rep("字幕 example ",20)
+check(table.concat(model.wrap(long_command,100,14))==long_command,"command inspection wraps without losing UTF-8 or spaces")
+local prose="Restore default keys. Replace saved edits."
+local prose_lines=model.wrap(prose,228,13,true)
+check(table.concat(prose_lines)==prose and #prose_lines==2 and prose_lines[1]:match("%s$"),"compact notices wrap at spaces without splitting words or changing text")
+for _,line in ipairs(model.wrap(long_command,100,14,true)) do check(model.text_width(line,14)<=100,"word wrapping still bounds long UTF-8 tokens") end
+
+-- Native track IDs, delays, amplification and clean subtitle overrides share action dispatch.
+playback.tracks={{type="sub",id=3},{type="sub",id=12,external=true},{type="audio",id=4},{type="audio",id=20}}
+caption_properties.sid,caption_properties.aid=3,4
+controller.action({kind="track-step",track="sub",value=1})
+check(caption_properties.sid==12 and caption_properties["sub-visibility"],"subtitle next includes a dynamically added track")
+controller.action({kind="track-step",track="sub",value=1})
+check(caption_properties.sid==3,"subtitle cycling wraps nonconsecutive IDs")
+controller.action({kind="track-step",track="audio",value=-1})
+check(caption_properties.aid==20,"audio previous wraps IDs")
+controller.action({kind="subtitles"})
+check(caption_properties["sub-visibility"]==false and caption_properties.sid==3,"CC Off retains the subtitle ID")
+check(feedback_icon=="cc" and feedback_text=="Subtitles off","subtitle toggle provides shared on-screen feedback")
+controller.action({kind="subtitles"})
+check(caption_properties.sid==3 and caption_properties["sub-visibility"] and feedback_text:find("Subtitles: ",1,true)==1,"subtitle toggle restores the retained track and announces it")
+controller.action({property="sub-visibility",value=false})
+check(feedback_text=="Subtitles off" and caption_properties.sid==3,"selector Off shares toggle semantics and feedback")
+caption_properties["sub-delay"],caption_properties["audio-delay"]=0,0
+controller.action({kind="delay",track="sub",value=-.05})
+controller.action({kind="delay",track="audio",value=.05})
+check(caption_properties["sub-delay"]==-.05 and caption_properties["audio-delay"]==.05,"sync controls independently advance/delay by 50 ms")
+controller.action({kind="sync-reset"})
+check(caption_properties["sub-delay"]==0 and caption_properties["audio-delay"]==0,"sync reset clears both native delays")
+caption_properties["volume-max"]=200
+controller.volume(180);check(caption_properties.volume==180,"volume supports amplification above 100%")
+controller.volume(300);check(caption_properties.volume==200,"volume clamps at the configured native ceiling")
+caption_properties["volume-max"]=150
+controller.volume(180);check(caption_properties.volume==150,"external native ceiling changes take effect immediately")
+caption_service.apply("reset")
+local authored={}
+for _,field in ipairs({"sub-font","sub-ass-override","sub-font-size","sub-color"}) do authored[field]=caption_properties[field] end
+caption_service.override()
+check(caption_properties["sub-ass-override"]=="strip" and caption_properties["sub-font"]=="Roboto","clean subtitles strip authored styles and use Roboto")
+caption_service.apply("font","serif")
+check(caption_properties["sub-ass-override"]=="strip","appearance changes retain a universal override")
+caption_service.override()
+for field,value in pairs(authored) do check(caption_properties[field]==value,"override Off restores the pre-toggle setting: "..field) end
+
+-- A preconfigured strip policy can be disabled, while Reset still honors startup settings.
+caption_properties["sub-ass-override"]="strip"
+local startup_strip=captions.new({},function() end)
+startup_strip.override()
+check(caption_properties["sub-ass-override"]=="scale","Off allows authored styles even when MPV started in strip mode")
+startup_strip.apply("reset")
+check(caption_properties["sub-ass-override"]=="strip","Reset preserves a startup strip preference")
+caption_properties["sub-ass-override"]="scale"
+
+-- Export planning refuses remote paths/unsupported codecs and uses native stream indices.
+local exporter=require("core.export")
+local export_state={path="/tmp/a video.mkv",sid=7,aid=8,tracks={
+    {type="sub",id=7,codec="ass",["ff-index"]=4,lang="../../en"},
+    {type="sub",id=9,codec="dvd_subtitle",["ff-index"]=5},
+    {type="sub",id=10,codec="webvtt",external=true,["external-filename"]="https://example.com/a.vtt"},
+    {type="audio",id=8,codec="opus",["ff-index"]=2},{type="audio",id=20,codec="aac",["ff-index"]=3}}}
+local planned,error,skipped=exporter.plan(export_state,"sub",true)
+check(#planned==1 and planned[1].index==4 and planned[1].format=="ass" and skipped==1,"all embedded exports skip unsupported tracks, preserving stream indices")
+check(planned[1].path=="/tmp/a video.sub-7.______en.ass","export names sanitize metadata without changing the source path")
+export_state.sid=10
+check(#exporter.plan(export_state,"sub",false)==0,"remote external subtitles cannot be exported through the local worker")
+export_state.path="https://example.com/video.mkv"
+check(#exporter.plan(export_state,"audio",true)==0,"remote media never starts local extraction")
+export_state.path="/tmp/a video.mkv"
+local base_job=#jobs
+local export_service=exporter.new(export_state,o,{request_render=noop,feedback=noop})
+jobs[base_job+1].callback(true,{status=0})
+export_service.start("audio",true)
+check(#jobs==base_job+2,"batch export starts only one worker")
+local first_export=jobs[base_job+2].command.args
+check(table.concat(first_export," "):find("-map 0:2",1,true) and table.concat(first_export," "):find("-c copy",1,true),"exports copy the selected source stream losslessly")
+export_service.start("audio",false)
+check(#jobs==base_job+2,"another export cannot start while a batch runs")
+jobs[base_job+2].callback(true,{status=0})
+check(#jobs==base_job+3,"the next track waits for the first worker")
+jobs[base_job+3].callback(true,{status=0})
+check(export_state.export_status=="Exported 2 track(s)","export batch reports completion")
+local target=exporter.plan(export_state,"audio",false)[1].path
+files[target]={size=10}
+export_service.start("audio",false)
+check(#jobs==base_job+3 and export_state.export_status:find("File exists:",1,true),"existing output files are never overwritten")
+files[target]=nil
+export_service.start("audio",false)
+local aborted=#jobs
+export_service.shutdown()
+check(jobs[aborted].aborted,"shutdown cancels active export")
+local last_status=export_state.export_status
+jobs[aborted].callback(true,{status=0})
+check(export_state.export_status==last_status,"late export completion cannot revive a cancelled worker")
+
+-- Missing or failed extraction cannot advertise readiness or falsely complete a batch.
+local unavailable={path=export_state.path,tracks=export_state.tracks,aid=8}
+local probe_index=#jobs+1
+local unavailable_service=exporter.new(unavailable,o,{request_render=noop,feedback=noop})
+jobs[probe_index].callback(false,nil)
+check(not unavailable.export_ready,"missing FFmpeg disables extraction")
+unavailable_service.start("audio",false)
+check(#jobs==probe_index,"an unavailable backend never starts an export worker")
+local backend_errors=0
+fake_mp.msg.error=function() backend_errors=backend_errors+1 end
+local failed_service=exporter.new(unavailable,o,{request_render=noop,feedback=noop})
+jobs[#jobs].callback(true,{status=0})
+failed_service.start("audio",true)
+local failed_index=#jobs
+jobs[failed_index].callback(true,{status=1,stderr="test container rejection"})
+check(backend_errors==1 and unavailable.export_status=="Export failed; see MPV log","container rejection reports failure instead of completion")
+check(#jobs==failed_index,"failed batch does not silently continue")
+failed_service.shutdown()
+
+-- Focus capture must release synchronously, before the next keyboard event or rendered frame.
+function fake_mp.remove_key_binding(name) bindings[name]=nil end
+local focus_active=false
+function fake_mp.commandv(command,section)
+    if section=="mpvtube-focus" then
+        if command=="enable-section" then focus_active=true elseif command=="disable-section" then focus_active=false end
+    end
+end
+input_options.keyboard=true
+input_player.speed=noop
+input_player.open_menu=function(page) input_state.menu=page end
+input_state.menu,input_state.focus,input_state.menu_focus=nil,nil,nil
+input_view.layout=ui.layout(input_state,input_options)
+local keyboard_input=require("core.input").new(input_state,input_options,input_view,input_player,{hide=noop})
+bindings["focus-next"]()
+check(input_state.focus and focus_active,"Tab immediately captures UI navigation")
+local before_modifier_actions=#actions
+bindings["focus-Ctrl+RIGHT"]()
+check(input_state.focus=="mute" and #actions==before_modifier_actions,"modifier arrows navigate the focused UI without seeking")
+local queued_right=bindings["focus-RIGHT"]
+bindings["focus-reset"]()
+check(not input_state.focus and not focus_active,"Backspace immediately restores playback navigation and resets Tab")
+caption_properties["input-bindings"]={{key="RIGHT",cmd="script-binding mpvtube/focus-RIGHT",priority=20,is_weak=false},
+    {key="RIGHT",cmd="seek 7",priority=0,is_weak=true}}
+local forwarded
+function fake_mp.command(command) forwarded=command end
+queued_right()
+check(forwarded=="seek 7","a queued UI event forwards to the underlying native/user binding after clearing")
+bindings["focus-next"]()
+local first_focus=input_state.focus
+bindings["focus-next"]()
+check(input_state.focus~=first_focus,"Tab advances to another available control")
+bindings["focus-reset"]();bindings["focus-next"]()
+check(input_state.focus==first_focus,"clear-to-player resets the Tab starting point")
+local title_option=input_options.title
+input_options.title=true
+local top_order={}
+for _=1,#ui.layout(input_state,input_options).hits do
+    bindings["focus-next"]()
+    if input_state.focus=="native-menu" or input_state.focus=="info" then top_order[#top_order+1]=input_state.focus end
+    if #top_order==2 then break end
+end
+check(top_order[1]=="native-menu" and top_order[2]=="info","Tab visits the top tools after the playback bar, from left to right")
+input_options.title=title_option
+input_state.menu="caption-font";keyboard_input.update_focus()
+bindings["menu-escape"]()
+check(input_state.menu=="captions","Escape steps back rather than clearing all menus")
+bindings["focus-reset"]()
+check(not input_state.menu and not focus_active,"clear shortcut closes the menu and releases Escape synchronously")
+input_state.menu=nil
+input_state.focus,input_state.focus_group="cc",nil
+input_view.layout=ui.layout(input_state,input_options)
+keyboard_input.update_focus()
+check(not input_state.focus,"unavailable controls cannot retain keyboard capture")
+bindings["focus-reset"]()
+bindings["focus-next"]();bindings["focus-next"]();bindings["focus-next"]()
+check(input_state.focus=="time","Tab follows the bar's visual order, including controls created later")
+bindings["focus-reset"]()
+input_state.menu="sub"
+bindings["focus-next"]()
+check(input_state.focus=="back","menu Tab starts at the leftmost header control")
+bindings["focus-next"]()
+check(input_state.focus=="caption-options","header controls with unequal heights share visual focus order")
+keyboard_input.shutdown()
+
 os.remove=original_remove
 print(string.format("Passed %d regression checks",count))

@@ -20,7 +20,7 @@ class Player:
                 raise RuntimeError("MPV exited unexpectedly")
             reply = json.loads(line)
             if reply.get("request_id") == self.serial:
-                if allow_unavailable and reply["error"] == "property unavailable": return None
+                if allow_unavailable and reply["error"] in ("property unavailable","property not found"): return None
                 assert reply["error"] == "success", (args, reply)
                 return reply.get("data")
 
@@ -65,12 +65,14 @@ class Player:
         return round(w/scale), round(h/scale), scale
 
     def settle(self):
-        deadline=time.monotonic()+6
+        deadline=time.monotonic()+8
+        # macOS can keep the old VO size briefly while entering its native fullscreen space.
+        required=16 if self.optional("fullscreen") else 6
         last,consecutive=None,0
         while time.monotonic() < deadline:
             dimensions=self.dimensions()
             consecutive=consecutive+1 if dimensions==last else 0
-            if consecutive >= 6:
+            if consecutive >= required:
                 return dimensions
             last=dimensions
             time.sleep(.1)
@@ -81,46 +83,102 @@ class Player:
         self.command("mouse", round(x*scale), round(y*scale), *([button, "single"] if click else []))
         time.sleep(.12)
 
+    def snapshot(self):
+        token=str(self.serial+1)
+        self.command("script-message-to","mpvtube","test-state",token)
+        deadline=time.monotonic()+2
+        while time.monotonic()<deadline:
+            value=self.optional("user-data/mpvtube-test-state")
+            if value and value["token"]==token: return value
+            time.sleep(.01)
+        raise AssertionError("Skin state snapshot unavailable")
+
+    def wait_state(self, field, expected, timeout=3):
+        deadline=time.monotonic()+timeout
+        while time.monotonic()<deadline:
+            state=self.snapshot()
+            if state[field]==expected: return state
+            time.sleep(.01)
+        raise AssertionError(f"Skin {field}: expected {expected!r}, got {state[field]!r}")
+
+    def control(self, name, click=True):
+        hit=next(hit for hit in self.snapshot()["hits"] if hit["id"]==name)
+        self.mouse(hit["x"]+hit["w"]/2,hit["y"]+hit["h"]/2,click)
+        return hit
+
+    def close_menu(self):
+        self.command("keypress","BS")
+        deadline=time.monotonic()+2
+        while time.monotonic()<deadline:
+            if not self.menu_is_open(): return
+            time.sleep(.02)
+        raise AssertionError("Menu/focus did not clear")
+
+    def close_native(self):
+        """Wait for MPV's console/select capture to release before sending playback keys."""
+        def active():
+            return any(binding.get("priority",-1)>=0 and "console/_console_text" in binding.get("cmd","")
+                       for binding in self.get("input-bindings"))
+        # IPC acknowledges a script action before the native dialog finishes opening.
+        deadline=time.monotonic()+2
+        while not active() and time.monotonic()<deadline:
+            time.sleep(.01)
+        assert active(),"Native console/select panel did not open"
+        self.command("keypress","ESC")
+        deadline=time.monotonic()+2
+        while time.monotonic()<deadline:
+            if not active(): return
+            time.sleep(.01)
+        raise AssertionError("Native console/select input did not release")
+
     def menu_is_open(self):
-        """The forced Escape binding exists only while a skin menu is open."""
-        return any(binding.get("cmd", "").endswith("script-binding mpvtube/menu-escape")
+        """The routing section's Escape binding is active while a menu or control has focus."""
+        return any(binding.get("priority",-1)>=0 and binding.get("cmd", "").endswith("script-binding mpvtube/menu-escape")
                    for binding in self.get("input-bindings"))
 
     def selected_row(self, count, expected):
-        """Check the one visible checkmark recorded by the integration-only drawing wrapper."""
-        _,h,_=self.dimensions()
-        capacity=max(1,int((h-100-57-16)/48))
-        height=57+min(count,capacity)*48+16
-        offset=min(max(0,expected-capacity),max(0,count-capacity))
-        y=h-62-height+57+8+(expected-offset-.5)*48
+        """Compare the drawn checkmark with the visible row from the actual layout."""
         deadline=time.monotonic()+2
         checks=[]
         while time.monotonic()<deadline:
+            state=self.snapshot()
+            hit=next((hit for hit in state["hits"] if hit.get("index")==expected),None)
             checks=self.get("user-data/mpvtube-test-checks")
-            if len(checks)==1 and abs(checks[0]["y"]-y)<.5: return
+            if hit and len(checks)==1 and abs(checks[0]["y"]-hit["y"]-hit["h"]/2)<.5: return
             time.sleep(.02)
         raise AssertionError(f"Expected the checkmark on row {expected}, got {checks}")
 
     def menu(self, page, count, row=None, header=True):
-        self.command("script-message-to", "mpvtube", "menu", page)
-        # YouTube-style page slides suppress pointer actions for 250 ms.
-        time.sleep(.28)
-        w, h, _ = self.dimensions()
-        header_height=57 if header else 0
-        cap = max(1, int((h-100-header_height-16)/48))
-        height = header_height + min(count, cap)*48+16
-        # All panels share a right edge; this click anchor also fits narrow choice menus.
-        x, y = w-212, h-62-height
+        """Open and target an index or label using shared geometry, with no animation wait."""
+        previous=self.snapshot()["menu"]
+        self.command("script-message-to","mpvtube","menu",page)
+        state=self.wait_state("menu",False if previous==page else page)
+        if state["menu"] is False: return 0,0
+        panel=state["panel"]
+        anchor_x=panel["x"]+panel["w"]/2
+        anchor_y=panel["y"]+panel["header"]+panel["padding"]+panel["row_h"]/2
         if row is not None:
-            offset=min(max(0,row-cap),max(0,count-cap))
-            if offset:
-                self.mouse(x+100,y+header_height+8+24)
-                for _ in range(offset): self.command("keypress","WHEEL_DOWN")
-                time.sleep(.1)
-            self.mouse(x+100, y+header_height+8+(row-offset-.5)*48, True)
+            self.menu_row(row)
         else:
-            self.mouse(x+100,y+header_height+8+24)
-        return x, y
+            self.mouse(anchor_x,anchor_y)
+        return panel["x"],panel["y"]
+
+    def menu_row(self, row):
+        """Reveal and click a row in an already open menu, including compact scrollable lists."""
+        state=self.snapshot()
+        panel=state["panel"]
+        self.mouse(panel["x"]+panel["w"]/2,panel["y"]+panel["header"]+panel["padding"]+panel["row_h"]/2)
+        if isinstance(row,str):
+            row=next(i+1 for i,item in enumerate(state["rows"]) if item["label"]==row)
+        for _ in range(len(state["rows"])+1):
+            state=self.snapshot()
+            hit=next((hit for hit in state["hits"] if hit.get("index")==row),None)
+            if hit:
+                self.mouse(hit["x"]+hit["w"]/2,hit["y"]+hit["h"]/2,True)
+                return
+            self.command("keypress","WHEEL_UP" if row<=state["panel"]["offset"] else "WHEEL_DOWN")
+            time.sleep(.02)
+        raise AssertionError(f"Menu row {row} is unreachable")
 
     def screenshot(self, path):
         time.sleep(.25)
@@ -142,24 +200,17 @@ class Player:
 
     def speed(self, value):
         self.menu("speed",3)
-        w,h,_=self.dimensions()
-        capacity=max(1,int((h-100-57-16)/48))
-        offset=max(0,2-capacity)
-        for _ in range(offset): self.command("keypress","WHEEL_DOWN")
+        for _ in range(3):
+            if any(hit["id"]=="speed-slider" for hit in self.snapshot()["hits"]): break
+            self.command("keypress","WHEEL_DOWN")
+            time.sleep(.02)
         slider_x,row_y,slider_width=self.speed_slider()
         self.mouse(slider_x+(value-.25)/1.75*slider_width,row_y,True)
         self.near("speed",value)
 
     def speed_slider(self):
-        """Geometry after speed() has scrolled the slider into view."""
-        w,h,_=self.dimensions()
-        capacity=max(1,int((h-100-57-16)/48))
-        offset=max(0,2-capacity)
-        width=min(320,w-24)
-        height=57+min(3,capacity)*48+16
-        slider_x=w-width-12+64
-        row_y=h-62-height+57+8+(2-offset-.5)*48
-        return slider_x,row_y,width-128
+        hit=next(hit for hit in self.snapshot()["hits"] if hit["id"]=="speed-slider")
+        return hit["x"],hit["y"]+hit["h"]/2,hit["w"]
 
     def speed_drag(self, values):
         """Check every intermediate rate while one mouse press remains held."""

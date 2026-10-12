@@ -4,10 +4,11 @@ local icons = require("ui.icons")
 local M = {metrics={inset=12,gap=12,compact_gap=8,control_height=40,control_bottom=8,
     hover_inset=4,hover_opacity=0.1,capsule_opacity=0.3,menu_bottom=62,
     menu_padding=8,menu_row=48,menu_header=57,safe_height=72,timeline_bottom=59}}
--- Sizes are CSS pixels; weights follow the live YouTube player's text roles.
+-- Sizes are CSS pixels; named roles share their font weights.
 M.text_styles={body={14,400},timer={14,500},chapter={13.07,500},header={12,500},header_action={12,400},
     tooltip={12.98,500},title={20,700},speed={18,900},step={24,500},preset={12,500},
-    hint={10,400},percentage={19.25,400},badge={6,700},seek={24,700}}
+    hint={10,400},percentage={19.25,400},badge={6,700},seek={24,700},dialog_title={18,500},
+    field_label={12,400},field_value={16,500},field_value_compact={14,500}}
 local Canvas = {}
 Canvas.__index = Canvas
 
@@ -41,10 +42,14 @@ function Canvas:style(rgb, opacity)
     return style
 end
 
-function Canvas:path(x, y, path, rgb, opacity, size, rotation)
+function Canvas:path(x, y, path, rgb, opacity, size, rotation, stroke)
     x,y=x+(self.dx or 0),y+(self.dy or 0)
     local scale = (size or 24) / 24 * 100
     local style = self:style(rgb, opacity)
+    if stroke then
+        local alpha=math.floor(255*(1-self.opacity*(opacity or 1))+.5)
+        style=style..string.format("\\bord%.2f\\1a&HFF&\\3c&H%s&\\3a&H%02X&",stroke,color(rgb or "ffffff"),alpha)
+    end
     -- ASS rotates counterclockwise; use the icon center for CSS-style clockwise rotation.
     if rotation then style=style..string.format("\\org(%.2f,%.2f)\\frz%.2f",x+(size or 24)/2,y+(size or 24)/2,-rotation) end
     self.events[#self.events + 1] = string.format(
@@ -53,7 +58,7 @@ function Canvas:path(x, y, path, rgb, opacity, size, rotation)
 end
 
 -- Cubic curves approximate rounded corners without depending on an icon font.
-function Canvas:rect(x, y, w, h, rgb, opacity, radius)
+function Canvas:rect(x, y, w, h, rgb, opacity, radius, stroke)
     if w <= 0 or h <= 0 then return end
     local r = math.min(radius or 0, w / 2, h / 2)
     local path
@@ -65,7 +70,7 @@ function Canvas:rect(x, y, w, h, rgb, opacity, radius)
             r, w-r, w-r+k, w, r-k, w, r, w, h-r, w, h-r+k, w-r+k, h, w-r, h,
             r, h, r-k, h, h-r+k, h-r, r, r-k, r-k, r)
     end
-    self:path(x, y, path, rgb, opacity)
+    self:path(x, y, path, rgb, opacity,nil,nil,stroke)
 end
 
 function Canvas:circle(x, y, r, rgb, opacity)
@@ -76,7 +81,10 @@ end
 function Canvas:hover(area,active)
     if active == nil then
         active=area.action and area.enabled ~= false and
-            (self.state.hover == area.id or area.index and self.state.menu_focus == area.index)
+            (self.state.hover == area.id or self.state.focus==area.id and self.state.focus_group==area.group or area.index and self.state.menu_focus == area.index)
+    end
+    if self.state.focus==area.id and self.state.focus_group==area.group and area.action then
+        self:rect(area.x+2,area.y+2,area.w-4,area.h-4,"ffffff",.85,area.hover_radius or 16,1)
     end
     local target=active and (area.id == "play" and self.state.pressed == area.id and 2 or 1) or 0
     local opacity=self:animate("hover:"..(area.group or "bar")..":"..area.id,target,"hover","modern",0)
@@ -140,7 +148,28 @@ function Canvas:label(role,x,y,text,rgb,align,opacity)
     self:text(x,y,text,style[1],rgb,align,opacity,style[2])
 end
 
--- A short stack of strips approximates YouTube's transparent black scrim.
+-- Feedback and tooltips share a measured, bounded text card; clipping is a final safety net.
+function Canvas:badge(role,cx,cy,text,max_width,height,padding,radius)
+    height,padding=height or 45,padding or 20
+    local style=M.text_styles[role]
+    local available=math.max(1,max_width-2*padding)
+    local label=model.fit(text,available,style[1])
+    local measure=self.state.measure_text or model.text_width
+    local text_width=measure(label,style[1],style[2])
+    if text_width>available then
+        label=model.fit(label,model.text_width(label,style[1])*available/text_width-style[1],style[1])
+        text_width=measure(label,style[1],style[2])
+    end
+    local width=math.min(max_width,math.ceil(text_width)+2*padding)
+    if self.state.w then cx=model.clamp(cx,width/2+M.metrics.inset,self.state.w-width/2-M.metrics.inset) end
+    self:rect(cx-width/2,cy-height/2,width,height,"000000",.6,radius or 3)
+    local layer=self:layer(1,{x=cx-width/2+padding,y=cy-height/2,w=width-2*padding,h=height})
+    layer:label(role,cx,cy,label,"ffffff",5)
+    self.events[#self.events+1]=layer:finish()
+    return {x=cx-width/2,y=cy-height/2,w=width,h=height,text=label}
+end
+
+-- A short stack of strips creates a transparent black title scrim.
 function Canvas:title_scrim(width)
     local height = 92
     local step = 4

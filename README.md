@@ -1,10 +1,10 @@
 # MPVTube
 
 [![MPV Supported: 0.40+](https://img.shields.io/badge/MPV_Supported-0.40%2B-691F69)](https://mpv.io/installation/)
-[![YouTube Player: 2026-10-11](https://img.shields.io/badge/YouTube_Player-2026--10--11-FF0033)](docs/DEVELOPMENT.md#youtube-comparison-and-motion-reference)
+[![Style: YouTube-inspired](https://img.shields.io/badge/Style-YouTube--inspired-FF0033)](docs/FEATURES.md)
 
 A YouTube-style on-screen controller for MPV, with rounded controls, chapters,
-fast hover previews, subtitle customization, speed/track menus and window modes.
+fast hover previews, subtitle customization, keyboard focus, advanced track controls and exports.
 MPV handles playback; the skin needs no browser, account or icon font.
 
 [Features and controls](docs/FEATURES.md) explains every feature and its effect
@@ -25,8 +25,9 @@ brew install mpv       # macOS with Homebrew
 
 Optional helpers:
 
-- **[FFmpeg](https://ffmpeg.org/download.html):** creates local-video previews.
-  Without it, hover timestamps and the controls still work.
+- **[FFmpeg](https://ffmpeg.org/download.html):** creates local-video previews and
+  exports subtitle/audio tracks. Without it, timestamps and playback still work;
+  extraction is unavailable. MPV has no general native extraction API.
 - **[yt-dlp](https://github.com/yt-dlp/yt-dlp):** resolves YouTube URLs for MPV.
   It is separate software, not part of MPVTube. The
   [Homebrew MPV package](https://formulae.brew.sh/formula/mpv) includes both helpers;
@@ -63,6 +64,7 @@ when upgrading. Copying only `main.lua` will not work.
 ```text
 mpv/
 ├── mpv.conf
+├── mpvtube-keys.json       # created by F1 when saving shortcuts
 ├── fonts/                  # four Roboto TTFs
 ├── script-opts/mpvtube.conf # optional skin settings
 └── scripts/mpvtube/
@@ -107,36 +109,50 @@ Audio works too. `--force-window=yes` requests a window when there is no video:
 
 ```sh
 mpv --force-window=yes "/path/to/song.mp3"
-mpv "https://www.youtube.com/watch?v=CMB5GCexb84"
 ```
 
-The URL example needs yt-dlp and network access.
+Remote playback requires the appropriate URL helper and network access.
 
 ## Quick controls
 
 | Key / gesture | Action |
 | --- | --- |
-| `Space`, `k`, click video | Play/pause |
+| Space, click video | Play/pause |
 | Hold left click on playing video | Temporary 2×, release restores speed |
-| Left/Right; `j`/`l` | Seek ±5 seconds; ±10 seconds |
-| `0`–`9`; `,`/`.` | Seek to 0%–90%; step one frame backward/forward |
-| Up/Down, wheel outside menus; `m` | Volume ±5%; mute |
-| `c` | Toggle subtitles; select first track if needed |
-| `f`, double-click video; `t`; `i` | Fullscreen; theater; mini player |
-| `Shift+P` / `Shift+N`; `<` / `>` | Previous/next playlist entry; speed ±0.25× |
-| Up/Down, Enter in menus; wheel; `Esc` | Focus/activate rows; scroll; close |
+| Left/Right; Shift; Ctrl; Ctrl+Alt | Seek ±10 / ±3 / ±60 / ±300 seconds |
+| Up/Down, wheel; `m` | Volume, up to 200% by default; mute |
+| `n` / `p`; `[` / `]` | Next/previous video; previous/next chapter |
+| `v` / `Alt+v`; `b` / `B` (Shift+b) | Next/previous subtitles; next/previous audio |
+| `c`; `Alt+c`; `u`; `C` (Shift+c); `a` | Toggle captions; subtitle selector; clean styling; chapters; audio selector |
+| `g` / `h`; `j` / `k` | Subtitles earlier/later; audio earlier/later, 50 ms |
+| `f`; `i` | Fullscreen; mini player |
+| Tab / Shift+Tab; Enter | Focus controls; activate |
+| Esc; Backspace | Step back; clear menus/focus and restore playback keys |
+| Ctrl+P; F1 | Native MPV tools; categorized shortcut editor |
 
-The speed menu uses Up/Down for 0.05× changes; Enter closes it.
-Compact **Expand/Close** reveals/hides secondary controls. See the
-[window-mode comparison](docs/FEATURES.md#window-modes) for theater and mini player.
+Letters are lowercase unless Shift is stated. Settings, CC and Audio open their
+respective views when no menu is visible; any of these three closes an open view.
+MPV Menu sits at the top right, beside information. **Settings → Export tracks** extracts tracks; **More controls**
+groups chapter/track navigation, synchronization and native tools.
+[Features and controls](docs/FEATURES.md) documents all keys, settings and native effects.
 
 ## Customize and troubleshoot
 
 Edit `script-opts/mpvtube.conf` and restart MPV. The
 [supplied file](script-opts/mpvtube.conf) explains **every option and default**,
-including size, font, accent, timing, feature switches and preview cache.
-For toggles, `yes` enables and `no` disables. Keep player settings in `mpv.conf`
-and custom keys in `input.conf`; those keys override normal skin shortcuts.
+including seek, volume/sync steps, amplification, panel sizes and preview cache.
+For toggles, `yes` enables and `no` disables. Keep player settings in `mpv.conf`.
+By default, **MPVTube owns the keyboard**, blocking native/input.conf fallbacks:
+unassigned keys do nothing. F1 edits skin keys, checks conflicts and saves to
+`mpvtube-keys.json` beside `mpv.conf`. Current/new keys are plain information.
+Choose **Record new shortcut**, press a key, then **Save changes** or Enter.
+Errors appear red in the fixed status card; successful saves appear green.
+**Reset all shortcuts** restores the built-in keys after confirmation, including
+unassigned keys. **Input diagnostics** is a read-only troubleshooting tool: inspect
+which command and script receive an input when it behaves unexpectedly.
+Only choose `shortcut_policy=compatible` if you want native/input.conf bindings;
+`exclusive` is a legacy alias of the default `mpvtube` policy. `keyboard=no`
+releases general keyboard ownership.
 
 `thumbnails=auto` prefers [thumbfast](https://github.com/po5/thumbfast), otherwise
 FFmpeg for local videos. Remote previews need thumbfast with network support.
@@ -150,7 +166,8 @@ installation, set `ffmpeg_path` to the executable's full path, without quotes.
 | Two bars | `osc=no`, other controller scripts, restart MPV |
 | No preview image | Local video with known duration, FFmpeg path or thumbfast availability |
 | Text/size differs | Bundled fonts, `font=Roboto`, `scale`; a custom `osd-fonts-dir` must include the TTFs |
-| Unexpected shortcut | Mapping in `input.conf` |
+| Unexpected shortcut | F1 shows owned/effective keys; Backspace clears UI focus; check `shortcut_policy` and competing scripts |
+| Cannot export | Local source, supported codec, FFmpeg path, existing output file; check export status/log |
 | Cannot seek | Source must be seekable; live streams need a DVR window |
 | YouTube URL fails | yt-dlp availability and MPV's log; remote access can fail independently of the skin |
 
@@ -161,13 +178,14 @@ Look for `MPVTube loaded` or an `[mpvtube]` error.
 
 Close MPV, remove `scripts/mpvtube/` and its optional settings file, change
 `osc=no` back to `osc=yes`, then restart. Remove the four Roboto TTFs if unused.
+Remove `mpvtube-keys.json` if you do not want to retain saved assignments.
 Separately installed helpers can remain.
 
-The skin adapts the **YouTube player**, with native MPV window modes and an
+The skin retains a YouTube-inspired visual style, with native MPV window modes and an
 in-player chapter list. It has no accounts, recommendations, casting or streaming
-resolution selector. Browser/libass text rendering, preview corners and window
-placement can differ. Native testing currently covers macOS with MPV 0.41;
+resolution selector. Font rendering, preview corners and window placement depend on native libraries
+and the operating system. Native testing currently covers macOS with MPV 0.41;
 Linux/Windows need platform verification.
 
 Source: [MIT](LICENSE). Bundled fonts: [Apache 2.0](LICENSE-Roboto.txt).
-MPVTube is an independent project; player outlines follow the observed YouTube UI.
+MPVTube is an independent project with its own controls and behavior.

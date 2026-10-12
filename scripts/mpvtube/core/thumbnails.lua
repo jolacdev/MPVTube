@@ -82,7 +82,7 @@ function Preview:provider()
     if self.options.thumbnails == "no" or not self.has_video then return nil end
     if self.options.thumbnails ~= "ffmpeg" and self.thumbfast
         and self.thumbfast.available and not self.thumbfast.disabled then return "thumbfast" end
-    if self.options.thumbnails ~= "thumbfast" and self.local_file and self.duration and self.duration > 0 and not self.failed then return "ffmpeg" end
+    if self.options.ffmpeg_available~=false and self.options.thumbnails ~= "thumbfast" and self.local_file and self.duration and self.duration > 0 and not self.failed then return "ffmpeg" end
 end
 
 -- The requested bucket always wins. Warm at most two neighbors while the pointer is nearby.

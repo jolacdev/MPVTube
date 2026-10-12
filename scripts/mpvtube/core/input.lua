@@ -12,8 +12,10 @@ function M.new(state, options, view, player, preview)
     local update_dimensions = view.update_dimensions
     local action, pause, seek = player.action, player.pause, player.seek
     local volume, relative_seek = player.volume, player.relative_seek
-    local subtitles, close_menu = player.subtitles, player.close_menu
+    local close_menu = player.close_menu
     local click_timer
+    local focus_keys_bound=false
+    local update_focus
     local function current_hit()
         return view.layout and ui.hit(view.layout,state.mx,state.my,mp.get_time()) or nil
     end
@@ -21,6 +23,165 @@ function M.new(state, options, view, player, preview)
         return state.menu and not (hit and (hit.id == "menu" or hit.group == state.menu))
     end
     local tooltip_timer = mp.add_timeout(options.tooltip_delay,request_render,true)
+
+    -- Focus is a stable hit ID plus menu page, never a stale rectangle after resize.
+    local function clear_focus(close)
+        state.focus,state.focus_group,state.menu_focus=nil,nil,nil
+        if close and state.menu then close_menu() end
+        if update_focus then update_focus() end
+        request_render()
+    end
+    local function focus(area)
+        state.focus,state.focus_group=area.id,area.group
+        state.menu_focus=area.index
+        state.hover=nil
+        preview:hide();show()
+        if update_focus then update_focus() end
+    end
+    local function focusable(layout)
+        local result={}
+        for _,area in ipairs(layout.hits) do
+            if area.action and next(area.action) and area.enabled~=false and area.id~="volume" and area.id~="timeline"
+                and (not state.menu or area.group==state.menu) then result[#result+1]=area end
+        end
+        table.sort(result,function(a,b)
+            if not state.menu then
+                if a.top~=b.top then return not a.top end
+                return a.x<b.x
+            end
+            local ay,by=a.y+a.h/2,b.y+b.h/2
+            if math.abs(ay-by)<1 then return a.x<b.x end
+            return ay<by
+        end)
+        if layout.seek_lo and not state.menu then
+            for _,area in ipairs(layout.hits) do if area.id=="timeline" then result[#result+1]=area;break end end
+        end
+        return result
+    end
+    local function cycle_focus(direction)
+        if state.idle then return end
+        update_dimensions()
+        view.layout=ui.layout(state,options)
+        local areas=focusable(view.layout)
+        if #areas==0 then return end
+        local index=direction>0 and 0 or 1
+        for i,area in ipairs(areas) do if area.id==state.focus and area.group==state.focus_group then index=i;break end end
+        focus(areas[(index-1+direction)%#areas+1])
+    end
+    local function focused_hit()
+        for _,area in ipairs((view.layout or {}).hits or {}) do
+            if area.id==state.focus and area.group==state.focus_group then return area end
+        end
+    end
+    local function activate_focus()
+        local area=focused_hit()
+        if not area then return end
+        local page=state.menu
+        action(area.action)
+        if state.menu and state.menu~=page and not state.focus then
+            local layout=ui.layout(state,options)
+            view.layout=layout
+            for _,hit in ipairs(layout.hits) do if hit.group==state.menu and hit.action then focus(hit);break end end
+        end
+        show()
+    end
+    -- Reuse the same reveal/focus path for arrow navigation and shortcut-recording results.
+    local function focus_menu_row(panel,index)
+        if index<=#panel.rows-panel.pinned then
+            state.menu_scroll=model.clamp(panel.offset,index-panel.visible,index-1)
+        end
+        view.layout=ui.layout(state,options)
+        for _,area in ipairs(view.layout.hits) do if area.index==index then focus(area);break end end
+    end
+    view.focus_menu_action=function(operation)
+        local panel=require("ui.menu").geometry(state,options)
+        for index,row in ipairs(panel.rows) do
+            if row.action and row.action.shortcut==operation then focus_menu_row(panel,index);return end
+        end
+    end
+    -- Up/down traverses the whole menu, scrolling focused rows into view.
+    local function menu_move(direction,edge)
+        if state.menu=="speed" then
+            player.speed(edge and (direction>0 and speed_controls.min or speed_controls.max) or mp.get_property_number("speed",state.speed)-direction*speed_controls.step)
+            return
+        end
+        local panel=require("ui.menu").geometry(state,options)
+        local index=edge and (direction>0 and 0 or #panel.rows+1) or state.menu_focus or panel.offset+(direction>0 and 0 or panel.visible+1)
+        repeat index=index+direction until index<1 or index>#panel.rows or panel.rows[index].action
+        if index<1 or index>#panel.rows then return end
+        focus_menu_row(panel,index)
+    end
+    local function navigate(key)
+        -- MPV may already have queued this handler before a preceding clear event ran.
+        -- Forward stale events to the effective playback binding, respecting keyboard ownership.
+        if not state.menu and not state.focus then
+            local bindings={}
+            for _,binding in ipairs(mp.get_property_native("input-bindings",{})) do
+                if not binding.cmd:find(mp.get_script_name().."/focus-",1,true) and not binding.cmd:find(mp.get_script_name().."/menu-escape",1,true) then
+                    bindings[#bindings+1]=binding
+                end
+            end
+            for _,binding in ipairs(require("core.shortcuts").effective(state,bindings)) do
+                if binding.key==key then mp.command(binding.cmd);break end
+            end
+            return
+        end
+        key=key:match("([^+]+)$")
+        if key=="ESC" then
+            if state.menu and state.menu~="settings" then player.open_menu(require("ui.menu").parent(state.menu));clear_focus(false)
+            else clear_focus(true) end
+        elseif key=="ENTER" or key=="SPACE" then
+            if state.menu=="speed" and not state.focus then close_menu() else activate_focus() end
+        elseif state.menu and (not state.focus or state.focus_group==state.menu) and (key=="UP" or key=="DOWN") then
+            menu_move(key=="UP" and -1 or 1)
+        else
+            local hit=focused_hit()
+            local direction=(key=="LEFT" or key=="DOWN") and -1 or 1
+            local edge=key=="HOME" or key=="END"
+            if hit and (hit.id=="mute" or hit.id=="volume") then
+                volume(edge and (key=="HOME" and 0 or state.volume_max or 200) or mp.get_property_number("volume",state.volume)+direction*(options.volume_step or 5),true)
+            elseif hit and hit.id=="speed-slider" then
+                player.speed(edge and (key=="HOME" and speed_controls.min or speed_controls.max) or mp.get_property_number("speed",state.speed)+direction*speed_controls.step)
+            elseif hit and hit.id=="timeline" then
+                if edge then
+                    local lo,hi=model.seek_window(state)
+                    if lo and hi then seek(key=="HOME" and lo or hi,true) end
+                else relative_seek(direction*(options.seek_short or 5)) end
+            elseif edge and state.menu and (not hit or hit.group==state.menu) then menu_move(key=="HOME" and 1 or -1,true)
+            elseif state.menu and key=="LEFT" then player.open_menu(require("ui.menu").parent(state.menu));clear_focus(false)
+            elseif key=="HOME" or key=="END" then
+                clear_focus(false);cycle_focus(key=="HOME" and 1 or -1)
+            else cycle_focus(direction) end
+        end
+        show()
+    end
+    -- Keep callbacks registered so already queued key events survive section deactivation.
+    local navigation_keys={"ESC","UP","DOWN","LEFT","RIGHT","ENTER","SPACE","HOME","END"}
+    for _,modifier in ipairs({"Shift+","Ctrl+","Ctrl+Alt+"}) do
+        for _,key in ipairs({"UP","DOWN","LEFT","RIGHT"}) do navigation_keys[#navigation_keys+1]=modifier..key end
+    end
+    local routes={}
+    local script_name=mp.get_script_name()
+    for _,key in ipairs(navigation_keys) do
+        local name=key=="ESC" and "menu-escape" or "focus-"..key
+        mp.add_key_binding(nil,name,function() navigate(key) end,
+            {repeatable=key:match("UP$")~=nil or key:match("DOWN$")~=nil or key:match("LEFT$")~=nil or key:match("RIGHT$")~=nil})
+        routes[#routes+1]=key.." nonscalable script-binding "..script_name.."/"..name
+    end
+    mp.commandv("define-section","mpvtube-focus",table.concat(routes,"\n"),"force")
+    update_focus=function()
+        if state.focus then
+            local hit=focused_hit()
+            if not hit or not hit.action or hit.enabled==false then clear_focus(false) end
+        end
+        local active=state.menu~=nil or state.focus~=nil
+        if active==focus_keys_bound then return end
+        focus_keys_bound=active
+        if active then mp.commandv("enable-section","mpvtube-focus","allow-hide-cursor+allow-vo-dragging")
+        else mp.commandv("disable-section","mpvtube-focus") end
+    end
+
+    view.update_focus=update_focus
 
     -- Holding the video accelerates playing media; release never turns it into a tap.
     local video_pressed, saved_speed, hold_consumed
@@ -59,7 +220,7 @@ function M.new(state, options, view, player, preview)
                 last_seek=now
             end
         elseif state.drag == "volume" and view.layout.volume.w > 0 then
-            volume((state.mx-view.layout.volume.x)/view.layout.volume.w*100)
+            volume((state.mx-view.layout.volume.x)/view.layout.volume.w*(state.volume_max or 200))
         elseif state.drag == "speed" and view.layout.speed then
             local slider=view.layout.speed
             local fraction=model.clamp((state.mx-slider.x)/slider.w,0,1)
@@ -91,7 +252,7 @@ function M.new(state, options, view, player, preview)
         if not state.drag and state.mouse_inside and mx == state.mx and my == state.my then return end
         state.mouse_inside=true
         state.mx,state.my=mx,my
-        if state.menu_focus then state.menu_focus=nil; request_render() end
+        if state.focus or state.menu_focus then clear_focus(false) end
         update_hover()
         if state.drag then drag_update(false) end
         show()
@@ -115,13 +276,16 @@ function M.new(state, options, view, player, preview)
             schedule_hide(); request_render(); return
         end
         if event.event == "down" or event.event == "press" then
+            clear_focus(false)
             update_hover()
             pressed_hit=current_hit()
             local menu_open=state.menu
-            -- Outside clicks dismiss first; bottom controls still own their actions.
+            -- Settings, CC and Audio dismiss any open panel; other controls keep their actions.
             if outside_menu(pressed_hit) then
+                local page=pressed_hit and pressed_hit.action and pressed_hit.action.page
+                local trigger=pressed_hit and (pressed_hit.dismiss_menu or page==state.menu)
                 close_menu()
-                if pressed_hit and pressed_hit.id == "settings" then pressed_hit=nil end
+                if trigger then pressed_hit=nil end
             end
             if state.opacity < 0.1 and not state.menu then
                 pressed_hit=model.contains(view.layout.safe_area,state.mx,state.my) and view.layout.safe_area or nil
@@ -184,70 +348,48 @@ function M.new(state, options, view, player, preview)
     -- Menus consume wheel scrolling inside their bounds; elsewhere it adjusts volume.
     local function wheel(direction)
         if state.menu and view.layout and model.contains(view.layout.menu,state.mx,state.my) then
-            state.menu_focus=nil
-            state.menu_scroll=model.clamp((state.menu_scroll or 0)-direction,0,math.max(0,#view.layout.menu.rows-view.layout.menu.visible))
+            clear_focus(false)
+            state.menu_scroll=model.clamp((state.menu_scroll or 0)-direction,0,math.max(0,#view.layout.menu.rows-view.layout.menu.pinned-view.layout.menu.visible))
             request_render()
-        else volume(state.volume+direction*5) end
+        else volume(mp.get_property_number("volume",state.volume)+direction*(options.volume_step or 5)) end
     end
 
     -- Capture the bottom strip, or the whole window while a menu owns outside clicks.
     mp.set_key_bindings({{"MBTN_RIGHT",right_click}},"mpvtube-controls","force")
     mp.enable_key_bindings("mpvtube-controls","allow-hide-cursor")
-    -- Mouse capture supports dragging while retaining MPV's cursor/window-drag behavior elsewhere.
-    mp.set_key_bindings({{"mouse_move",mouse_move},{"mouse_leave",function()
+    local function mouse_leave()
         stop_hold()
         state.pressed,pressed_hit=nil,nil
         state.mouse_inside,state.hover=false,nil
         if state.drag then drag_update(true) end
         state.drag,state.drag_time=nil,nil
-        preview:hide(); schedule_hide(); request_render()
-    end}},"mpvtube-motion","force")
-    mp.enable_key_bindings("mpvtube-motion","allow-vo-dragging+allow-hide-cursor")
-    mp.add_forced_key_binding("MBTN_LEFT","mouse-button",mouse_button,{complex=true})
-    mp.add_forced_key_binding("MBTN_LEFT_DBL","double-click",double_click)
-    mp.add_key_binding("WHEEL_UP","wheel-up",function() wheel(1) end)
-    mp.add_key_binding("WHEEL_DOWN","wheel-down",function() wheel(-1) end)
-
-    -- Normal keyboard bindings allow input.conf overrides; toggles never repeat on hold.
-    if options.keyboard then
-        local function change_speed(amount)
-            local value=model.clamp(state.speed+amount,speed_controls.min,speed_controls.max)
-            mp.set_property_number("speed",value)
-            feedback(string.format("%.2g×",value),"speed")
-            show()
-        end
-        local keys = {
-            {"SPACE","play-pause",pause},{"k","play-pause-k",pause},
-            {"j","rewind",function() relative_seek(-10) end},{"l","forward",function() relative_seek(10) end},
-            {"LEFT","seek-left",function() relative_seek(-5) end},{"RIGHT","seek-right",function() relative_seek(5) end},
-            {"UP","volume-up",function() volume(state.volume+5,true) end},{"DOWN","volume-down",function() volume(state.volume-5,true) end},
-            {"m","mute",function() action({kind="mute",show_feedback=true}) end},{"f","fullscreen",function() action({kind="fullscreen"}) end},
-            {"c","subtitles",subtitles},{"t","theater",function() action({kind="theater"}) end},
-            {"i","mini-player",function() action({kind="pip"}) end},
-            {"Shift+N","next",function() action({kind="next"}) end},{"Shift+P","previous",function() action({kind="previous"}) end},
-            {".","frame-next",function() mp.commandv("frame-step"); show() end},
-            {",","frame-previous",function() mp.commandv("frame-back-step"); show() end},
-            {">","speed-up",function() change_speed(0.25) end},
-            {"<","speed-down",function() change_speed(-0.25) end},
-        }
-        local repeatable={j=true,l=true,LEFT=true,RIGHT=true,UP=true,DOWN=true,["."]=true,[","]=true,[">"]=true,["<"]=true}
-        for _, key in ipairs(keys) do mp.add_key_binding(key[1],key[2],key[3],{repeatable=repeatable[key[1]] or false}) end
-        for digit=0,9 do
-            local percent=digit/10
-            mp.add_key_binding(tostring(digit),"seek-"..digit,function()
-                local lo,hi=model.seek_window(state)
-                if lo and hi then seek(lo+(hi-lo)*percent,true); show() end
-            end)
-        end
+        preview:hide();schedule_hide();request_render()
     end
-    -- Escape is forced only while a menu is open; otherwise retain MPV's native action.
+    local function execute(descriptor)
+        if descriptor.kind=="focus" then cycle_focus(descriptor.value)
+        elseif descriptor.kind=="clear-focus" then clear_focus(true)
+        else action(descriptor) end
+    end
+    view.open_menu=player.open_menu
+    local shortcuts=require("core.shortcuts").new(state,options,view,execute,{
+        {key="MOUSE_MOVE",id="mouse_move",callback=mouse_move},
+        {key="MOUSE_LEAVE",id="mouse-leave",callback=mouse_leave},
+        {key="MBTN_LEFT",id="mouse-button",callback=mouse_button,complex=true},
+        {key="MBTN_LEFT_DBL",id="double-click",callback=double_click},
+        {key="WHEEL_UP",id="wheel-up",callback=function() wheel(1) end},
+        {key="WHEEL_DOWN",id="wheel-down",callback=function() wheel(-1) end},
+        {key="CLOSE_WIN",id="close-window",callback=function() mp.commandv("quit") end},
+    })
     mp.add_key_binding(nil,"close-menu",close_menu)
 
     -- A file change cancels the whole gesture, including a tap waiting for a double-click.
     local function reset_interaction()
+        if view.cancel_key_capture then view.cancel_key_capture() end
         stop_hold()
         hold_consumed=false
         pressed_hit,state.pressed,state.drag,state.drag_time=nil,nil,nil,nil
+        state.menu=nil
+        clear_focus(false)
         tooltip_timer:kill()
         if click_timer then click_timer:kill() end
     end
@@ -257,7 +399,9 @@ function M.new(state, options, view, player, preview)
     mp.observe_property("speed","number",function(_,speed)
         if state.speed_hold and speed ~= 2 then stop_hold() end
     end)
-    return {update_hover=update_hover, shutdown=reset_interaction}
+    return {update_hover=update_hover,update_focus=update_focus,shutdown=function()
+        reset_interaction();state.menu=nil;update_focus();shortcuts.shutdown()
+    end}
 end
 
 return M
