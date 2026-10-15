@@ -1,7 +1,8 @@
 # Features and controls
 
-MPVTube keeps YouTube-style controls and adds native MPV tools. Playback settings apply for the current session. Shortcut edits are saved to the
-skin’s own keymap; native playback configuration stays under MPV’s control.
+MPVTube keeps YouTube-style controls and adds native MPV tools. Playback settings
+apply for the current session. Animation choices and shortcut edits persist in
+the skin's own files; native playback configuration stays under MPV's control.
 
 ## Mouse and keyboard
 
@@ -278,10 +279,19 @@ remain available; thumbfast can still supply pictures. Cold decoding depends on
 hardware/media; cached images are immediate. Missing helpers/metadata gracefully fall back to labels.
 
 Roboto styles, vector icons, colors, spacing and hover/toggle geometry are shared.
-Menus are translucent black; controls retain YouTube-style capsules. Hovers,
-sliders, tooltips and switch knobs share 0.2 s transitions. Menus paint immediately.
-Volume waves, gear rotation and seek/volume feedback use `ui.motion`, retarget
-smoothly and stop scheduling when settled.
+Menus are translucent black; controls retain YouTube-style capsules. Animations
+are enabled by default. **Settings → Animations** changes all skin motion
+immediately and saves the choice to `mpvtube-preferences.json`, beside `mpv.conf`.
+The toggle always shows the accepted value; failed saves leave it unchanged and
+explain the problem. Saved UI choices override `animations` in `script-opts/mpvtube.conf`.
+Delete the preferences file to return to configuration defaults. `preferences_path`
+can select another file inside an existing writable folder, like `keymap_path`.
+Menus open, navigate and scroll immediately in both modes.
+With animations off, all skin transitions snap to their new state, tooltips have
+no waiting period and preview requests ignore `thumbnail_delay`. Feedback appears
+fully visible and stationary, then disappears after its normal notice duration.
+Static notices use one expiry timer, without continuous redraws. Actual decoding,
+display refresh and native OS fullscreen/window animations are outside this setting.
 Central feedback keeps its icon centered in a circle; percentages, synchronization,
 track names and other messages share a separate text card above it. Long messages
 truncate inside the player margins; small windows use smaller cards/icons. Tooltips
@@ -289,9 +299,16 @@ reuse the same measured background and text-padding helper. Central playback
 feedback stays hidden while a centered shortcut workspace owns that space.
 The OS cursor is retained without overlays.
 
-Controls auto-hide after three seconds while playing; pause, hover, focus, menus
-or drags keep them open. Reveal uses configurable `fade_duration=0.25`; hiding
-uses 40% of that. Zero disables visibility fading, retaining other transitions.
+Controls auto-hide after `hide_timeout=0.7` seconds of inactivity while playing;
+pause, hover, focus, menus or drags keep them open. Releasing keyboard focus restarts
+the hide timer. With animations enabled, reveal uses `fade_duration=0.1` and hiding
+takes 40% of that. `fade_duration=0` disables only the bar fade; `animations=no`
+disables all skin motion. Previously copied configuration values remain in effect.
+
+Video taps toggle playback on release without waiting for a double-click timeout.
+A paired double-click restores the tap's previous pause state before switching
+fullscreen. The recognition window and 350 ms hold-to-2× threshold distinguish
+gestures; they do not delay ordinary controls or keyboard actions.
 
 Fullscreen uses MPV's native window. Mini player, button or I, exits fullscreen,
 requests a small borderless window near bottom-right and enables stay-on-top.

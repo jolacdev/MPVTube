@@ -64,7 +64,8 @@ when upgrading. Copying only `main.lua` will not work.
 ```text
 mpv/
 ├── mpv.conf
-├── mpvtube-keys.json       # created by F1 when saving shortcuts
+├── mpvtube-keys.json        # created by F1 when saving shortcuts
+├── mpvtube-preferences.json # created by Settings when saving the animation choice
 ├── fonts/                  # four Roboto TTFs
 ├── script-opts/mpvtube.conf # optional skin settings
 └── scripts/mpvtube/
@@ -93,7 +94,7 @@ Move the mouse over a video. Try play/pause, the expanding volume slider,
 elapsed/remaining time, timeline dragging and the gear menu. Empty space in the
 bottom strip should leave playback unchanged. Check key feedback and smooth
 hover/menu transitions, then resize the window and press `f` for fullscreen.
-Controls hide after three seconds during playback and stay visible while paused.
+Controls hide after 0.7 seconds during playback and stay visible while paused.
 
 To try the skin **without installing**, run from this project's folder:
 
@@ -142,6 +143,25 @@ Edit `script-opts/mpvtube.conf` and restart MPV. The
 [supplied file](script-opts/mpvtube.conf) explains **every option and default**,
 including seek, volume/sync steps, amplification, panel sizes and preview cache.
 For toggles, `yes` enables and `no` disables. Keep player settings in `mpv.conf`.
+
+Animations are on by default. **Settings → Animations** switches them off/on
+immediately and remembers your choice in `mpvtube-preferences.json`, beside
+`mpv.conf`. The bar now auto-hides after 0.7 seconds of inactivity.
+
+For configuration without using the UI toggle, edit `script-opts/mpvtube.conf`:
+
+```ini
+animations=no
+hide_timeout=0.7
+```
+
+Set `animations=yes` to restore transitions. Saved UI preferences take precedence;
+delete `mpvtube-preferences.json` to return to `.conf` defaults.
+With `no`, controls, hovers, tooltips and feedback appear immediately; previews
+skip any configured waiting period.
+Video taps act on release in both modes. Existing installations with
+`hide_timeout=3` should change that line to `0.7`, then restart MPV.
+
 By default, **MPVTube owns the keyboard**, blocking native/input.conf fallbacks:
 unassigned keys do nothing. F1 edits skin keys, checks conflicts and saves to
 `mpvtube-keys.json` beside `mpv.conf`. Current/new keys are plain information.
@@ -179,6 +199,7 @@ Look for `MPVTube loaded` or an `[mpvtube]` error.
 Close MPV, remove `scripts/mpvtube/` and its optional settings file, change
 `osc=no` back to `osc=yes`, then restart. Remove the four Roboto TTFs if unused.
 Remove `mpvtube-keys.json` if you do not want to retain saved assignments.
+Remove `mpvtube-preferences.json` to discard saved UI choices.
 Separately installed helpers can remain.
 
 The skin retains a YouTube-inspired visual style, with native MPV window modes and an

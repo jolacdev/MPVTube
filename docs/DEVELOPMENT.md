@@ -16,6 +16,7 @@ modules. This follows [MPV script packaging](https://mpv.io/manual/stable/#scrip
 | `core/model.lua` | Pure formatting, metadata, track IDs, seek bounds and feedback bursts |
 | `core/player.lua` | Shared native actions, menus, amplification and temporary window settings |
 | `core/shortcuts.lua` | Shared action registry, ownership, conflict checks and persistent key editor |
+| `core/preferences.lua` | Saved UI animation choice and atomic file replacement shared with shortcuts |
 | `core/export.lua` | Codec-aware export planning and one asynchronous stream-copy worker |
 | `core/input.lua` | Mouse gestures, Tab focus, synchronous key routing, 2× holds and tooltips |
 | `core/captions.lua` | Native subtitle choices, observations and Reset |
@@ -40,7 +41,7 @@ Key invariants:
   without becoming video taps. Left clicks retain bottom-control actions; right clicks
   are captured only over UI or while menus are open. Held sliders capture the window; seek drags throttle
   keyframe seeks and commit exactly on release.
-- File changes cancel pending taps, presses and 2× holds. Shutdown kills callbacks
+- File changes discard tap snapshots and cancel presses and 2× holds. Shutdown kills callbacks
   and restores temporary settings, preserving later subtitle-position/end-of-file
   changes. Focused/menu key capture ends synchronously on dismissal, before the next key event.
   Tab stores hit IDs/pages, resolves fresh geometry after resize and skips unavailable controls.
@@ -211,7 +212,8 @@ not that many independent scenarios.
 Pure checks use sample state, generated ASS instructions and deterministic clocks.
 They verify formatting, missing metadata, bounds, focus, styling, animations and
 hit capture. A fake `mp` records native writes/workers and lets tests trigger
-callbacks immediately or defer property notifications, including delayed clicks, aborted prefetch, provider handoff and stale file/track completions.
+callbacks immediately or defer property notifications, including gesture expiry,
+aborted prefetch, provider handoff and stale file/track completions.
 Installed code uses the real API.
 
 ### Understanding the Python tests
@@ -290,10 +292,26 @@ Roboto roles, vector icons and shared geometry coherent when adding controls.
 | Rows | Ordinary 48 px, shortcut 40 px, compact 30 px; padding 8 px; pinned subtitle-style footer |
 | Feedback | Centered circle/icon, bounded separate top text card; compact sizing |
 
-`ui.motion` owns hover, tooltip, switch, wave and feedback transitions. Menu
-opening/closing, navigation and scrolling have no animation delay or pointer guard.
-Retarget from current values and prune settled tracks. Visibility still uses
-`fade_duration`; menu painting has full opacity independently of the bar fade.
+`ui.motion` owns hover, tooltip, switch, wave and feedback transitions. Its shared
+`begin(now, enabled)` bypass snaps all values and clears in-flight tracks when
+`animations=no`. Animations default to on. Static feedback keeps its settled
+geometry and uses one expiry timer rather than a frame loop. Tooltips and preview coalescing also
+bypass their configured delays. Animated mode retargets current values and prunes
+settled tracks; `fade_duration` controls the bar only. Menus never delay input.
+The default inactivity timeout is 0.7 seconds, including after releasing focus.
+Video taps act immediately; a short-lived pause snapshot undoes the first tap of
+a paired double-click. File changes discard the snapshot and cancel gesture timers.
+
+Run `python3 tests/integration.py` for the default animated mode and add
+`--animations=no` for the instant regression. Both load a real temporary `.conf`,
+toggle through Settings and check saved UI precedence after restarting MPV.
+Native checks cover first-frame expansion,
+static-feedback redraws, video-tap latency and quick auto-hide; Lua clocks verify
+all motion bypasses, feedback expiry, tooltip exit and double-click pause restoration.
+`core.preferences` reads the saved override after configuration, applies UI changes
+only after a successful atomic save and refuses malformed/changed files. It shares
+the shortcut editor's recoverable Windows replacement path; no extra dependency
+or background watcher is introduced. Tests isolate both preference/keymap paths.
 
 Native limits: preview corners stay square, subtitle backing styles use MPV’s
 single layer, bitmap captions cannot be restyled, and placement depends on the

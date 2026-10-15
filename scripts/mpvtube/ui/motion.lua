@@ -21,7 +21,10 @@ end
 local Animator = {}
 Animator.__index=Animator
 function M.new() return setmetatable({tracks={},now=0},Animator) end
-function Animator:begin(now) self.now,self.active,self.used=now,false,{} end
+function Animator:begin(now,enabled)
+    self.now,self.active,self.used,self.enabled=now,false,{},enabled~=false
+    if not self.enabled then self.tracks={} end
+end
 local function sample(track,now)
     local progress=track.duration == 0 and 1 or clamp((now-track.start)/track.duration,0,1)
     return track.from+(track.target-track.from)*M.ease(progress,track.curve),progress < 1
@@ -29,6 +32,8 @@ end
 
 -- Retarget from the displayed value, so reversals never jump or restart from an endpoint.
 function Animator:value(key,target,kind,curve,initial)
+    -- One bypass covers every shared transition, including reversals already in flight.
+    if self.enabled==false then return target end
     self.used[key]=true
     local track=self.tracks[key]
     if not track or track.target ~= target then
@@ -50,8 +55,13 @@ function Animator:finish()
 end
 
 -- Shared feedback grows/fades for 250 ms, holds, then shrinks/fades out.
-function M.feedback(item,now)
+function M.feedback(item,now,enabled)
     local age=now-item.start
+    if enabled==false then
+        local visible=age < (item.kind=="seek" and M.duration.seek or M.duration.feedback)
+        item.opacity,item.scale,item.offset=visible and 1 or 0,1.33,0
+        return visible
+    end
     if item.kind == "seek" then
         item.opacity=M.ease(age/M.duration.seek_fade,"enter")*
             (1-M.ease((age-M.duration.seek+M.duration.seek_fade)/M.duration.seek_fade,"leave"))

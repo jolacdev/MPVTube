@@ -101,7 +101,7 @@ end
 -- Coalesce the first request without restarting on movement; follow-up work has no delay.
 function Preview:queue(delay)
     if not self.job and self:next_bucket() and not self.timer:is_enabled() then
-        self.timer.timeout=delay or self.options.thumbnail_delay
+        self.timer.timeout=self.options.animations==false and 0 or delay or self.options.thumbnail_delay
         self.timer:resume()
     end
 end

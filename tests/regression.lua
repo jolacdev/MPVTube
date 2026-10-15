@@ -46,6 +46,25 @@ check(tween:value("test",0,"hover")==0,"elapsed clock settles after a long frame
 check(not tween:finish(),"settled animation stops requesting frames")
 tween:begin(.6);tween:finish()
 check(next(tween.tracks)==nil,"removed controls release their transition tracks")
+do
+    tween:begin(.7);tween:value("test",1,"hover",nil,0)
+    tween:begin(.71,false)
+    for kind in pairs(motion.duration) do
+        check(tween:value(kind,1,kind,nil,0)==1,"disabled motion snaps immediately: "..kind)
+        check(tween:value(kind,0,kind)==0,"disabled motion reverses immediately: "..kind)
+    end
+    check(not tween:finish() and next(tween.tracks)==nil,"disabling in-flight motion clears tracks and schedules no animation frames")
+    tween:begin(.8,true)
+    check(tween:value("test",1,"hover",nil,0)==0 and tween:finish(),"animation can be enabled again after an immediate frame")
+    for _,kind in ipairs({"volume","seek"}) do
+        local item={start=0,kind=kind}
+        local duration=kind=="seek" and motion.duration.seek or motion.duration.feedback
+        for _,age in ipairs({0,.01,.5,duration-.001}) do
+            check(motion.feedback(item,age,false) and item.opacity==1 and item.scale==1.33 and item.offset==0,"static feedback is fully visible and stationary: "..kind)
+        end
+        check(not motion.feedback(item,duration,false) and item.opacity==0,"static feedback expires without a fade: "..kind)
+    end
+end
 for _,age in ipairs({0,.125,.25,.5,.75,.875,1}) do
     local item={start=0,icon="volume_up"}
     local running=motion.feedback(item,age)
@@ -494,6 +513,22 @@ check(not immediate:find("Audio track",1,true),"page changes discard the previou
 check(ui.hit(opened_speed,opened_speed.speed.x+10,opened_speed.speed.y+12).id=="speed-slider","new sliders accept clicks on the opening frame")
 check(not animator.tracks["menu-opacity"],"menus have no opacity animation or input guard")
 animated_state.menu=nil
+
+-- No-animation rendering shares the exact menu/hover geometry without intermediate frames.
+do
+    animator:begin(4,false)
+    animated_state.hover,animated_state.hover_age="play",0
+    local options={}
+    for key,value in pairs(o) do options[key]=value end
+    options.animations=false
+    local data=ui.render(animated_state,options,animator)
+    check(animator.tooltip and data:find(animator.tooltip.text,1,true),"disabled animations show a tooltip on the first hover frame")
+    check(not animator:finish() and next(animator.tracks)==nil,"static rendering does not start transition tracks")
+    animator:begin(4.001,false)
+    animated_state.hover=nil
+    data=ui.render(animated_state,options,animator)
+    check(not data:find("(Space)",1,true) and animator.tooltip==nil,"static tooltip disappears on the first exit frame")
+end
 local closed=frame(1.5)
 check(not closed:find("Playback speed",1,true),"closing removes menu content immediately")
 animated_state.hover,animated_state.hover_age="play",1
@@ -658,8 +693,49 @@ check(retry_flags["-probesize"]=="5000000" and retry_flags["-skip_frame"]=="defa
 finish(base+2)
 check(p:request(10)~=nil,"the full decode retry restores a cached preview")
 p:shutdown()
+do
+    local immediate_options={animations=false,thumbnail_delay=1,thumbnail_interval=5,thumbnail_cache=2}
+    local immediate=require("core.thumbnails").new(immediate_options,function() end)
+    immediate.duration,immediate.wanted=100,{provider="ffmpeg",bucket=1}
+    immediate:queue()
+    check(immediate.timer.timeout==0 and immediate.timer:is_enabled(),"disabled animations bypass a configured preview coalescing delay")
+    immediate:shutdown()
+end
 
 -- Caption actions preserve channel alpha/hue and restore the startup configuration exactly.
+do
+    local preferences=require("core.preferences")
+    local utils=require("mp.utils")
+    local parse,format=utils.parse_json,utils.format_json
+    utils.parse_json=function(data)
+        local version,value=data:match('^%{"version":(%d),"animations":(%a+)%}$')
+        if version and (value=='true' or value=='false') then return {version=tonumber(version),animations=value=='true'} end
+    end
+    utils.format_json=function(data) return '{"version":1,"animations":'..tostring(data.animations)..'}' end
+    local path=os.tmpname();os.remove(path)
+    local options={animations=true,preferences_path=path}
+    local save=preferences.new(options)
+    check(save(false) and not options.animations,"saving a UI choice applies its accepted value")
+    local saved=preferences.read(path)
+    local restarted={animations=true,preferences_path=path}
+    preferences.new(restarted)
+    check(not restarted.animations,"saved UI choice survives a restart over a different configuration default")
+    local file=io.open(path,'wb');file:write(saved..'\n');file:close()
+    check(not save(true) and not options.animations and preferences.read(path)==saved..'\n',"concurrent preference edits block saves without changing the UI or file")
+    file=io.open(path,'wb');file:write('{"version":2,"animations":false}');file:close()
+    restarted.animations=true
+    local unsupported=preferences.new(restarted)
+    check(restarted.animations and not unsupported(false),"unknown preference schemas retain defaults and remain untouched")
+    file=io.open(path,'wb');file:write('broken JSON');file:close()
+    local invalid=preferences.new(restarted)
+    check(not invalid(false) and preferences.read(path)=='broken JSON',"malformed preferences are never overwritten")
+    os.remove(path)
+    options.preferences_path=path..'/missing/preferences.json'
+    save=preferences.new(options)
+    check(not save(true) and not options.animations,"failed preference writes leave the current option unchanged")
+    utils.parse_json,utils.format_json=parse,format
+end
+
 local caption_properties={["sub-font"]="Arial",["sub-font-size"]=42,["sub-color"]="#FFFFFFFF",
     ["sub-back-color"]="#AF000000",["sub-border-style"]="outline-and-shadow",
     ["sub-outline-size"]=1.65,["sub-shadow-offset"]=0,["sub-outline-color"]="#FF000000",
@@ -826,7 +902,7 @@ local noop=function() end
 local input_view={show=noop,feedback=noop,request_render=noop,schedule_hide=noop,update_dimensions=noop}
 local actions,menus_closed={},0
 local input_player={action=function(descriptor) if descriptor and next(descriptor) then actions[#actions+1]=descriptor end end,
-    pause=function() pauses=pauses+1 end,seek=noop,volume=noop,relative_seek=noop,subtitles=noop,
+    pause=function() pauses=pauses+1;caption_properties.pause=not fake_mp.get_property_bool("pause",false) end,seek=noop,volume=noop,relative_seek=noop,subtitles=noop,
     close_menu=function() input_state.menu=nil;menus_closed=menus_closed+1 end}
 local input_options={tooltip_delay=.45,video_click=true,keyboard=false,menu_width=380,keymap_path=os.tmpname(),shortcut_policy="mpvtube"}
 os.remove(input_options.keymap_path)
@@ -843,14 +919,38 @@ local function fire_pending()
 end
 mouse("up");fire_pending()
 check(pauses==0,"an unmatched mouse release cannot toggle playback")
-for _,event in ipairs({"file-loaded","end-file"}) do
-    mouse("press");events[event]();fire_pending()
-    check(pauses==0,"file lifecycle cancels pending video taps: "..event)
-    mouse("down");events[event]();mouse("up");fire_pending()
-    check(pauses==0 and not input_state.pressed,"old held releases do not act on the next file: "..event)
+for _,point in ipairs({{-10,250},{970,250},{480,-10},{480,610}}) do
+    local before=#actions
+    mouse("press",point[1],point[2]);bindings["double-click"]();fire_pending()
+    check(pauses==0 and #actions==before and not input_state.speed_hold,"out-of-window events cannot toggle playback, fullscreen or a hold")
 end
+for _,event in ipairs({"file-loaded","end-file"}) do
+    local before=pauses
+    mouse("press")
+    check(pauses==before+1,"video taps change playback before any timer: "..event)
+    events[event]();fire_pending()
+    check(pauses==before+1,"file lifecycle cannot replay a completed video tap: "..event)
+    mouse("down");events[event]();mouse("up");fire_pending()
+    check(pauses==before+1 and not input_state.pressed,"old held releases do not act on the next file: "..event)
+end
+pauses=0
 mouse("press");fire_pending()
-check(pauses==1,"a normal video tap still pauses after the double-click deadline")
+check(pauses==1,"double-click expiry does not toggle playback again")
+do
+    local before=caption_properties.pause
+    mouse("press")
+    check(caption_properties.pause~=before,"video tap applies its native pause state immediately")
+    bindings["double-click"]()
+    check(caption_properties.pause==before and actions[#actions].kind=="fullscreen","paired double-click restores pause before entering fullscreen")
+    fire_pending()
+    check(caption_properties.pause==before,"paired double-click expiry cannot pause later")
+    mouse("press")
+    events["file-loaded"]()
+    before=caption_properties.pause
+    bindings["double-click"]()
+    check(caption_properties.pause==before,"a new file discards the previous tap's pause ownership")
+    pauses=1
+end
 mouse("down",480,596);fire_pending();mouse("up",480,596);fire_pending()
 check(pauses==1 and not input_state.speed_hold,"bottom safe area consumes taps and holds")
 -- Menu dismissal uses the same hits as controls, including passive bar margins.
@@ -915,7 +1015,7 @@ for _,page in ipairs({"settings","audio","sub","captions","caption-font","speed"
     end
 end
 mouse("press");input.shutdown();fire_pending()
-check(pauses==1,"shutdown cancels pending input callbacks")
+check(pauses==2,"shutdown cancels pending input callbacks without replaying an immediate tap")
 -- Short control labels must fit alongside their shortcut column, using the painted insets.
 s.w,s.h,s.menu,s.menu_scroll=960,600,"controls",99
 local full_labels={}

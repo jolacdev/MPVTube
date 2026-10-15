@@ -40,6 +40,7 @@ function M.rows(state, page, options)
         row("Export tracks",state.export_ready and "" or "FFmpeg required","export",state.export_ready and {page="exports"} or nil)
         rows[#rows].disabled=not state.export_ready
         row("Loop video", "", "loop", {property="loop-file", value=state.loop_file == "no" and "inf" or "no"}, state.loop_file ~= "no", true)
+        row("Animations", "", "animations", {kind="animations"}, not options or options.animations~=false, true)
         if #state.playlist > 1 then
             row("Autoplay", "", "play", {kind="autoplay"}, state.keep_open ~= "always", true)
             row("Playlist", tostring(state.playlist_pos+1).." / "..#state.playlist, "playlist", {page="playlist"})

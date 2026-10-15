@@ -18,6 +18,7 @@ OUT = ROOT / "tests/output"
 OUT.mkdir(parents=True, exist_ok=True)
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--generate-fixtures",action="store_true",help="create the video, MP3 and WAV fixtures without launching MPV")
+parser.add_argument("--animations",choices=("yes","no"),default="yes",help="test the animation setting, default: yes")
 args=parser.parse_args()
 for executable in (("ffmpeg",) if args.generate_fixtures else ("mpv", "ffmpeg")):
     if not shutil.which(executable):
@@ -100,6 +101,12 @@ def wait_preview(logfile, previous, timeout=1):
 
 
 with tempfile.TemporaryDirectory(prefix="mpvtube-ipc-") as temp:
+    # Read the setting from a real isolated .conf, also reused by later player launches.
+    configuration=Path(temp)/"config"
+    (configuration/"script-opts").mkdir(parents=True)
+    preferences=configuration/"script-opts/mpvtube.conf"
+    preferences.write_text(f"animations={args.animations}\n")
+    ui_preferences=Path(temp)/"mpvtube-preferences.json"
     ipc = Path(temp) / "player.sock"
     logfile = OUT / "integration.log"
     # Record checkmarks from actual drawing calls, without adding diagnostics to the skin.
@@ -135,6 +142,9 @@ end
 local ui=require("ui.view")
 local layout=ui.layout
 local last_state,last_options
+local render_count=0
+local render=ui.render
+ui.render=function(...) render_count=render_count+1;return render(...) end
 ui.layout=function(state,options)
     last_state,last_options=state,options
     return layout(state,options)
@@ -146,14 +156,16 @@ mp.register_script_message("test-state",function(token)
         menu=last_state.menu or false,hover=last_state.hover or false,drag=last_state.drag or false,opacity=last_state.opacity,hits=current.hits,panel=current.menu,rows=current.menu and current.menu.rows or {},
         key_capture=last_state.key_capture or false,key_candidate=last_state.key_candidate or false,keymap_message=last_state.keymap_message or "",
         keymap_tone=last_state.keymap_tone or "",feedback=last_state.feedback or false,
-        export_ready=last_state.export_ready or false,export_status=last_state.export_status or ""})
+        export_ready=last_state.export_ready or false,export_status=last_state.export_status or "",
+        animations=last_options.animations,volume_expand=last_state.volume_expand,render_count=render_count,
+        hide_timeout=last_options.hide_timeout})
 end)
 dofile(source.."/main.lua")
 ''' % json.dumps(str(ROOT / "scripts/mpvtube")))
     with (OUT / "console.log").open("w") as console:
-        process = subprocess.Popen(["mpv", "--no-config", *input_isolation, f"--script={script}",f"--osd-fonts-dir={ROOT / 'fonts'}",
+        process = subprocess.Popen(["mpv", f"--config-dir={configuration}","--load-scripts=no", *input_isolation, f"--script={script}",f"--osd-fonts-dir={ROOT / 'fonts'}",
             "--force-window=yes", "--idle=yes", "--geometry=1920x1200", "--pause", "--ao=null", "--keep-open=yes",
-            f"--input-ipc-server={ipc}", f"--log-file={logfile}", f"--script-opts=mpvtube-keymap_path={temp}/keys.json", str(sample)], stdout=console, stderr=console)
+            f"--input-ipc-server={ipc}", f"--log-file={logfile}", f"--script-opts=mpvtube-keymap_path={temp}/keys.json,mpvtube-preferences_path={ui_preferences}", str(sample)], stdout=console, stderr=console)
         player = None
         try:
             deadline = time.monotonic()+15
@@ -168,6 +180,60 @@ dofile(source.."/main.lua")
             player.command("script-message-to", "mpvtube", "show")
             player.screenshot(OUT / "controls.png")
             w, h, scale = player.dimensions()
+            snapshot=player.snapshot()
+            assert snapshot["animations"]==(args.animations=="yes"),"animation setting did not load from .conf"
+            assert snapshot["hide_timeout"]==.7,"default auto-hide is not 0.7 seconds"
+            for enabled in (args.animations!="yes",args.animations=="yes"):
+                player.menu("settings",100,row="Animations",header=False)
+                player.wait_state("animations",enabled,.2)
+                assert json.loads(ui_preferences.read_text())["animations"]==enabled,"UI preference was not saved"
+                row=next(row for row in player.snapshot()["rows"] if row["label"]=="Animations")
+                assert row.get("selected",False)==enabled,"animation toggle did not reflect its accepted value"
+                player.screenshot(OUT/f"animations-{'on' if enabled else 'off'}.png")
+                player.close_menu()
+            saved_preferences=ui_preferences.read_text()
+            ui_preferences.write_text(saved_preferences+"\n")
+            player.menu("settings",100,row="Animations",header=False)
+            assert player.snapshot()["animations"]==(args.animations=="yes"),"rejected preference save changed the toggle"
+            assert ui_preferences.read_text()==saved_preferences+"\n","UI overwrote externally edited preferences"
+            ui_preferences.write_text(saved_preferences)
+            player.close_menu()
+            if args.animations=="no":
+                # Revealing and clicking a hidden bar in one event must not swallow the action.
+                player.mouse(w/2,h/2)
+                player.command("script-message-to","mpvtube","hide")
+                player.wait_state("opacity",0,.15)
+                player.command("mouse",round(32*scale),round((h-27)*scale),0,"single")
+                player.wait("pause",False,.15)
+                player.command("set_property","pause",True)
+                player.wait("pause",True)
+                # First-frame geometry and static feedback must not wait for a tween or keep ticking.
+                player.mouse(83,h-27)
+                player.wait_state("volume_expand",1,.15)
+                player.command("keypress","UP")
+                time.sleep(.06)
+                snapshot=player.snapshot()
+                assert snapshot["feedback"]["opacity"]==1 and snapshot["feedback"]["scale"]==1.33
+                count=snapshot["render_count"]
+                time.sleep(.15)
+                assert player.snapshot()["render_count"]<=count+1,"static feedback kept redrawing"
+                player.screenshot(OUT/"instant-feedback.png")
+                # A real video tap acts before MPV's 300 ms double-click window expires.
+                player.mouse(w/2,h/2)
+                player.command("mouse",round(w/2*scale),round(h/2*scale),0,"single")
+                player.wait("pause",False,.15)
+                started=time.monotonic()
+                player.wait_state("opacity",0,1.05)
+                hide_latency=time.monotonic()-started
+                assert hide_latency<1,"controls did not hide promptly"
+                player.command("set_property","pause",True)
+                player.wait("pause",True)
+                player.mouse(32,h-27)
+                player.wait_state("opacity",1,.15)
+                print(f"Instant UI: auto-hide observed within {hide_latency*1000:.0f} ms",flush=True)
+                player.command("set_property","volume",100)
+                player.command("seek",0,"absolute+exact")
+                player.position(0,.1)
             player.mouse(w/2,h/2)
             cursor_policy=player.get("cursor-autohide")
             cursor_fs_only=player.get("cursor-autohide-fs-only")
@@ -825,6 +891,8 @@ dofile(source.."/main.lua")
             player.settle()
             w,h,scale=player.dimensions()
             double_click_pause=player.get("pause")
+            player.command("mouse",round(w/2*scale),round(h/2*scale),0,"single")
+            player.wait("pause",not double_click_pause,.15)
             player.command("mouse",round(w/2*scale),round(h/2*scale),0,"double")
             player.wait("fullscreen",True)
             player.settle()
@@ -857,6 +925,9 @@ dofile(source.."/main.lua")
             # Real VO resizing, hover transitions, tooltips, and scrollable menus.
             for width,height in [(1280,800),(800,500),(600,360),(1920,1200)]:
                 player.command("set_property","geometry",f"{width}x{height}")
+                # A stable old size can precede macOS applying the requested resize.
+                player.near("osd-width",width,.5)
+                player.near("osd-height",height,.5)
                 w,h,_=player.settle()
                 player.mouse(32,h-27)
                 time.sleep(.5)
@@ -1006,18 +1077,19 @@ dofile(source.."/main.lua")
             player.wait("path",str(long_duration))
             player.wait("vo-configured",True)
             player.command("set_property","pause",True)
+            w,h,scale=player.settle()
             for position in (0,600,3600,36000):
                 player.command("seek",position,"absolute+exact")
                 player.position(position)
                 player.mouse(w/2,h/2)
                 time.sleep(.2)
-                player.mouse(150,h-27)
+                player.control("time",False)
                 player.screenshot(OUT / f"time-{position}.png")
-                player.mouse(150,h-27,True)
+                player.control("time")
                 player.screenshot(OUT / f"remaining-{position}.png")
                 player.position(position)
                 player.wait("pause",True)
-                player.mouse(150,h-27,True)
+                player.control("time")
 
             player.command("loadfile",str(seek_sample),"replace")
             player.wait("path",str(seek_sample))
@@ -1101,6 +1173,8 @@ dofile(source.."/main.lua")
                 process.wait(timeout=5)
 
     # Small isolated launches verify ownership, persisted keys and absent optional helpers.
+    # Saved UI choices take precedence even if the configuration default changes.
+    preferences.write_text(f"animations={'no' if args.animations=='yes' else 'yes'}\n")
     native_input=Path(temp)/"input.conf"
     native_input.write_text("SPACE set volume 77\nc set volume 43\nd set volume 37\nMBTN_LEFT cycle pause\n")
     empty_keys={row["action"]["id"]:"none" for row in guide["rows"] if row.get("action",{}).get("shortcut")=="select"}
@@ -1111,9 +1185,9 @@ dofile(source.."/main.lua")
         keymap.write_text(json.dumps({"version":1,"keys":keys}))
         profile_log=OUT/f"policy-{policy}.log"
         with profile_log.open("w") as console:
-            process=subprocess.Popen(["mpv","--no-config",*input_isolation[:3],"--force-window=yes",f"--script={script}",f"--osd-fonts-dir={ROOT/'fonts'}",
+            process=subprocess.Popen(["mpv",f"--config-dir={configuration}","--load-scripts=no",*input_isolation[:3],"--force-window=yes",f"--script={script}",f"--osd-fonts-dir={ROOT/'fonts'}",
                 f"--input-conf={native_input}",f"--input-ipc-server={profile_ipc}","--pause","--ao=null","--geometry=960x600",
-                f"--script-opts=mpvtube-keymap_path={keymap},mpvtube-shortcut_policy={'mpvtube' if policy=='empty' else policy},mpvtube-volume_step=2,mpvtube-sync_step=0.025,mpvtube-ffmpeg_path=/mpvtube-missing-ffmpeg",str(sample)],
+                f"--script-opts=mpvtube-keymap_path={keymap},mpvtube-preferences_path={ui_preferences},mpvtube-shortcut_policy={'mpvtube' if policy=='empty' else policy},mpvtube-volume_step=2,mpvtube-sync_step=0.025,mpvtube-ffmpeg_path=/mpvtube-missing-ffmpeg",str(sample)],
                 stdout=console,stderr=console)
             player=None
             try:
@@ -1124,6 +1198,7 @@ dofile(source.."/main.lua")
                 player=Player(profile_ipc)
                 player.wait("vo-configured",True,12)
                 w,h,_=player.settle()
+                assert player.snapshot()["animations"]==(args.animations=="yes"),"animation setting did not survive restarting MPV"
                 player.mouse(6,h-4,True)
                 player.wait("pause",True)
                 if policy=="empty":

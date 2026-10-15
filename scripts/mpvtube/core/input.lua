@@ -13,7 +13,7 @@ function M.new(state, options, view, player, preview)
     local action, pause, seek = player.action, player.pause, player.seek
     local volume, relative_seek = player.volume, player.relative_seek
     local close_menu = player.close_menu
-    local click_timer
+    local click_timer,click_pause
     local focus_keys_bound=false
     local update_focus
     local function current_hit()
@@ -22,6 +22,9 @@ function M.new(state, options, view, player, preview)
     local function outside_menu(hit)
         return state.menu and not (hit and (hit.id == "menu" or hit.group == state.menu))
     end
+    local function inside_window()
+        return state.mx>=0 and state.my>=0 and state.mx<state.w and state.my<state.h
+    end
     local tooltip_timer = mp.add_timeout(options.tooltip_delay,request_render,true)
 
     -- Focus is a stable hit ID plus menu page, never a stale rectangle after resize.
@@ -29,6 +32,7 @@ function M.new(state, options, view, player, preview)
         state.focus,state.focus_group,state.menu_focus=nil,nil,nil
         if close and state.menu then close_menu() end
         if update_focus then update_focus() end
+        schedule_hide()
         request_render()
     end
     local function focus(area)
@@ -240,7 +244,7 @@ function M.new(state, options, view, player, preview)
         if id ~= state.hover then
             state.hover,state.hover_start=id,mp.get_time()
             tooltip_timer:kill()
-            if hit and hit.tip then tooltip_timer.timeout=options.tooltip_delay; tooltip_timer:resume() end
+            if hit and hit.tip and options.animations~=false then tooltip_timer.timeout=options.tooltip_delay; tooltip_timer:resume() end
             request_render()
         end
     end
@@ -293,7 +297,7 @@ function M.new(state, options, view, player, preview)
             state.pressed=pressed_hit and pressed_hit.id
             stop_hold()
             hold_consumed=false
-            if not pressed_hit and not menu_open and options.video_click then video_pressed=true; hold_timer:resume() end
+            if not pressed_hit and not menu_open and options.video_click and inside_window() then video_pressed=true; hold_timer:resume() end
             if pressed_hit and pressed_hit.id == "timeline" then state.drag="seek"
             elseif pressed_hit and pressed_hit.id == "volume" then state.drag="volume" end
             if pressed_hit and pressed_hit.id == "speed-slider" then state.drag="speed" end
@@ -312,10 +316,13 @@ function M.new(state, options, view, player, preview)
                 if held then show()
                 elseif pressed_hit and hit and pressed_hit.id == hit.id then action(hit.action)
                 elseif state.menu then close_menu()
-                elseif video_tap and not pressed_hit and not hit and options.video_click then
-                    -- Wait for a possible double-click before changing pause state.
+                elseif video_tap and not pressed_hit and not hit and options.video_click and inside_window() then
+                    -- Act on release immediately; retain only enough state to undo a paired double-click.
                     if click_timer then click_timer:kill() end
-                    click_timer=mp.add_timeout(mp.get_property_number("input-doubleclick-time",300)/1000,pause)
+                    local before=mp.get_property_bool("pause",state.pause)
+                    pause()
+                    click_pause={before=before,after=mp.get_property_bool("pause",not before)}
+                    click_timer=mp.add_timeout(mp.get_property_number("input-doubleclick-time",300)/1000,function() click_pause=nil end)
                 end
             end
             pressed_hit=nil
@@ -333,7 +340,11 @@ function M.new(state, options, view, player, preview)
         update_dimensions()
         view.layout=ui.layout(state,options)
         local hit=current_hit()
-        if not hit then action({kind="fullscreen"}) end
+        if not hit and inside_window() then
+            if click_pause and mp.get_property_bool("pause")==click_pause.after then mp.set_property_bool("pause",click_pause.before) end
+            action({kind="fullscreen"})
+        end
+        click_pause=nil
     end
 
     -- Right clicks dismiss outside menus; UI capture prevents MPV's native pause binding.
@@ -382,7 +393,7 @@ function M.new(state, options, view, player, preview)
     })
     mp.add_key_binding(nil,"close-menu",close_menu)
 
-    -- A file change cancels the whole gesture, including a tap waiting for a double-click.
+    -- A file change cancels gestures and forgets pause state owned by the previous tap.
     local function reset_interaction()
         if view.cancel_key_capture then view.cancel_key_capture() end
         stop_hold()
@@ -392,6 +403,7 @@ function M.new(state, options, view, player, preview)
         clear_focus(false)
         tooltip_timer:kill()
         if click_timer then click_timer:kill() end
+        click_pause=nil
     end
     mp.register_event("end-file",reset_interaction)
     mp.register_event("file-loaded",reset_interaction)

@@ -12,9 +12,9 @@ local mp_options = require("mp.options")
 -- Validate skin options once; drawing and input share these values.
 local function load_options()
     local options = {
-        scale=1, font="Roboto", accent="ff0033", hide_timeout=3, fade_duration=0.25,
-        show_on_pause=true, title=true, tooltip_delay=0.45, menu_width=480, menu_opacity=0.6,
-        shortcut_width=900, shortcut_policy="mpvtube", keymap_path="",
+        scale=1, font="Roboto", accent="ff0033", animations=true, hide_timeout=0.7, fade_duration=0.1,
+        show_on_pause=true, title=true, tooltip_delay=0.15, menu_width=480, menu_opacity=0.6,
+        shortcut_width=900, shortcut_policy="mpvtube", keymap_path="",preferences_path="",
         keyboard=true, video_click=true, pip=true, raise_subtitles=true, thumbnails="auto",
         ffmpeg_path="ffmpeg", thumbnail_width=200, thumbnail_interval=2, thumbnail_delay=0,
         thumbnail_cache=64, pip_width=480, seek_precise=3, seek_short=10, seek_medium=60, seek_long=300,
@@ -50,6 +50,7 @@ local function load_options()
 end
 
 local options = load_options()
+local save_animations=require("core.preferences").new(options)
 options.ffmpeg_available=false
 
 -- Observers fill playback fields; input and animation fields live in the same state table.
@@ -81,7 +82,7 @@ state.measure_text=function(text,size,weight)
     end
     return text_cache[key]
 end
-local render_timer, hide_timer
+local render_timer, hide_timer, feedback_timer
 local view = {}
 local visibility_target=0
 local animation=motion.new()
@@ -92,7 +93,15 @@ local function request_render()
     if render_timer and not render_timer:is_enabled() and not stopped then render_timer:resume() end
 end
 
+view.set_animations=function(enabled)
+    local ok,error=save_animations(enabled)
+    if ok then request_render() end
+    return ok,error
+end
+
 local function fade(target)
+    -- Hit testing uses the new visibility immediately, even before the first static frame.
+    if not options.animations then state.opacity=target end
     if target == visibility_target then return end
     visibility_target=target
     request_render()
@@ -120,6 +129,10 @@ local function feedback(text, icon, side, amount)
     local now=mp.get_time()
     state.feedback=amount and model.seek_feedback(state.feedback,amount,now,motion.duration.seek)
         or {text=text,icon=icon,side=side,start=now,opacity=1}
+    -- Static notices need one expiry callback, not a continuous redraw loop.
+    feedback_timer:kill()
+    feedback_timer.timeout=amount and motion.duration.seek or motion.duration.feedback
+    feedback_timer:resume()
     request_render()
 end
 
@@ -149,14 +162,14 @@ local input = require("core.input").new(state,options,view,player,preview)
 local function render()
     if stopped or not update_dimensions() then return end
     local now=mp.get_time()
-    animation:begin(now)
+    animation:begin(now,options.animations)
     state.opacity=animation:value("controls",visibility_target,options.fade_duration*(visibility_target == 1 and 1 or 0.4),
         visibility_target == 1 and "enter" or "leave",0)
     local volume_hover=ui.volume_hover(state,view.layout)
     state.volume_expand=animation:value("volume-expand",volume_hover and 1 or 0,"volume",volume_hover and "enter" or "leave",0)
     state.timeline_expand=animation:value("timeline-expand",(state.hover == "timeline" or state.drag == "seek") and 1 or 0,"timeline",nil,0)
     if state.feedback then
-        if not motion.feedback(state.feedback,now) then state.feedback=nil end
+        if not motion.feedback(state.feedback,now,options.animations) then state.feedback=nil end
     end
     state.hover_age=state.hover_start and now-state.hover_start or 0
     player.update_subtitles()
@@ -187,10 +200,11 @@ local function render()
     end
     input.update_hover()
     input.update_focus()
-    if animation:finish() or state.feedback then request_render() end
+    if animation:finish() or (options.animations and state.feedback) then request_render() end
 end
 
 render_timer=mp.add_timeout(1/60,render,true)
+feedback_timer=mp.add_timeout(1,function() state.feedback=nil;request_render() end,true)
 hide_timer=mp.add_timeout(options.hide_timeout,function()
     if not held_open() then fade(0) end
 end,true)
@@ -254,6 +268,7 @@ mp.register_script_message("toggle",function() if visibility_target > 0 then hid
 
 -- File changes cancel old previews; shutdown also restores temporary player settings.
 local function reset_interactions()
+    feedback_timer:kill()
     state.menu,state.drag,state.drag_time=nil,nil,nil
     state.feedback,state.pressed=nil,nil
     state.focus,state.focus_group,state.menu_focus=nil,nil,nil
@@ -278,7 +293,7 @@ mp.register_event("end-file",function()
 end)
 mp.register_event("shutdown",function()
     stopped=true
-    render_timer:kill(); hide_timer:kill()
+    render_timer:kill(); hide_timer:kill(); feedback_timer:kill()
     input.shutdown(); preview:shutdown(); overlay:remove(); text_overlay:remove(); player.shutdown()
 end)
 

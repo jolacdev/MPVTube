@@ -312,7 +312,8 @@ end
 -- Retain a departing tooltip only for its fade; all tooltip motion uses the shared engine.
 local function render_tooltip(canvas,state,controls,options)
     local content
-    if not state.menu and state.hover and (state.hover_age or 0) >= options.tooltip_delay then
+    local delay=options.animations==false and 0 or options.tooltip_delay
+    if not state.menu and state.hover and (state.hover_age or 0) >= delay then
         for _,hit in ipairs(controls.hits) do
             if hit.id == state.hover and hit.tip then
                 local width=model.text_width(hit.tip,13)+20

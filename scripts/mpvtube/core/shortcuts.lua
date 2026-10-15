@@ -1,5 +1,6 @@
 -- One action registry supplies key bindings and labels for the in-player guide.
 local M = {}
+local preferences=require('core.preferences')
 function M.defaults(options)
     local keys={}
     local volume_step=options.volume_step or 5
@@ -201,9 +202,7 @@ function M.new(state,options,view,execute,mouse_bindings)
     state.script_name=script
     local path=options.keymap_path and options.keymap_path~='' and options.keymap_path or mp.command_native({'expand-path','~~/mpvtube-keys.json'})
     local function read()
-        local file=io.open(path,'rb')
-        if not file then return nil end
-        local data=file:read('*a');file:close();return data
+        return preferences.read(path)
     end
     local original=read()
     local saved=original and utils.parse_json(original) or {version=1,keys={}}
@@ -292,23 +291,7 @@ function M.new(state,options,view,execute,mouse_bindings)
         -- Empty untyped Lua tables become JSON arrays; keep the key dictionary an object.
         local data=utils.format_json({version=1,keys=next(keys) and keys or utils.parse_json('{}')})
         if not data then message('Invalid keymap data; current shortcuts retained','error');return end
-        local suffix=os.tmpname();os.remove(suffix);suffix=suffix:gsub('.*[/\\]','')
-        local temporary=path..'.'..suffix
-        local file=io.open(temporary,'wb')
-        local ok=file and file:write(data)
-        if file then ok=file:close() and ok end
-        if ok then
-            ok=os.rename(temporary,path)
-            if not ok and original then
-                -- Windows does not replace an existing destination with rename; restore on failure.
-                local backup=temporary..'.bak'
-                if os.rename(path,backup) then
-                    ok=os.rename(temporary,path)
-                    if ok then os.remove(backup) else os.rename(backup,path) end
-                end
-            end
-        end
-        os.remove(temporary)
+        local ok=preferences.write(path,data,original)
         if not ok then message('Cannot save keymap; check folder permissions','error');return end
         original,saved=data,{version=1,keys=keys}
         return true

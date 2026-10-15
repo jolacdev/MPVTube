@@ -172,6 +172,9 @@ function M.new(state, options, view, preview)
     action=function(descriptor)
         if not descriptor then return end
         if descriptor.page then open_menu(descriptor.page)
+        elseif descriptor.kind=="animations" then
+            local ok,error=view.set_animations(not options.animations)
+            notify(ok and (options.animations and "Animations on" or "Animations off") or error,"animations")
         elseif descriptor.speed then speed(descriptor.speed)
         elseif descriptor.speed_step then speed(mp.get_property_number("speed",state.speed)+descriptor.speed_step)
         elseif descriptor.caption then
